@@ -3,8 +3,11 @@ import {
   guessCategory, reservedFromPlans, buildPlan, eatenInfo, lastDinnerProtein, forecast, matchRecipes,
   applyConsumption, restoreConsumption,
 } from './logic.js';
-import { loadState, saveState, loadAi, saveAi, defaultState, uid } from './store.js';
+import { loadState, saveState, loadAi, saveAi, defaultState, normalizeState, uid } from './store.js';
 import { aiPlan, aiRecipes } from './ai.js';
+import {
+  sync, initSync, pushState, signIn, signOutSync, createHousehold, joinHousehold, leaveHousehold, inviteLink,
+} from './sync.js';
 
 let state = loadState();
 let ai = loadAi();
@@ -18,7 +21,13 @@ const ui = {
   aiRecipes: null,
   busy: false,
   catTouched: false,
+  joinCode: new URLSearchParams(location.search).get('join') || '',
+  pendingRender: false,
 };
+if (ui.joinCode) {
+  ui.tab = 'settings';
+  history.replaceState(null, '', location.pathname);
+}
 
 // ---------- 유틸 ----------
 const $ = (s) => document.querySelector(s);
@@ -28,9 +37,25 @@ const cubeById = (id) => state.cubes.find((c) => c.id === id);
 const mealKeys = (meals) => Object.keys(meals).sort((a, b) => MEALS[a].order - MEALS[b].order);
 
 function commit() {
+  // 클라우드 문서 크기(1MB)를 넘지 않도록 120일 지난 식단은 정리
+  const cutoff = addDays(today, -120);
+  for (const d of Object.keys(state.plans)) if (d < cutoff) delete state.plans[d];
   saveState(state);
+  pushState(state);
   render();
 }
+/** 입력 중인 칸이 있으면 다 입력할 때까지 다시 그리기를 미룬다 (다른 기기 변경이 들어올 때) */
+function safeRender() {
+  const a = document.activeElement;
+  if (a && a.closest('#main') && /INPUT|SELECT|TEXTAREA/.test(a.tagName)) ui.pendingRender = true;
+  else render();
+}
+document.addEventListener('focusout', () => {
+  if (ui.pendingRender) {
+    ui.pendingRender = false;
+    setTimeout(render, 0);
+  }
+});
 function toast(msg, kind = '') {
   const el = $('#toast');
   el.textContent = msg;
@@ -57,6 +82,22 @@ function addLog(type, label, items) {
   return entry.id;
 }
 
+// ---------- 동기화 표시 ----------
+const SYNC_LABEL = {
+  loading: ['', '연결 중'],
+  'signed-out': ['', '로그인 필요'],
+  'no-household': ['', '공유 안 함'],
+  syncing: ['mid', '저장 중'],
+  synced: ['ok', '동기화됨'],
+  offline: ['warn', '오프라인'],
+  error: ['bad', '동기화 오류'],
+};
+function syncBadge() {
+  if (sync.status === 'off') return '';
+  const [cls, text] = SYNC_LABEL[sync.status] || ['', ''];
+  return `<button class="sync-chip ${cls}" data-action="goto-sync" aria-label="동기화 상태: ${text}">☁️ ${text}</button>`;
+}
+
 // ---------- 헤더 ----------
 function renderHeader() {
   const a = ageInfo(state.baby.birth, today);
@@ -66,7 +107,7 @@ function renderHeader() {
     ? '<span class="pill">아침·점심·저녁 3끼</span>'
     : `<span class="pill">점심·저녁 2끼</span><span class="pill soft">3끼 시작 ${shortDate(nine)} · D-${toNine}</span>`;
   $('#header').innerHTML = `
-    <div class="brand">🧊 이유식 큐브</div>
+    <div class="brand">🧊 이유식 큐브 ${syncBadge()}</div>
     <div class="baby">
       <strong>${esc(state.baby.name)}</strong>
       <span>생후 ${a.months}개월 ${a.days}일 · D+${a.totalDays}</span>
@@ -364,10 +405,60 @@ function viewRecipes() {
 }
 
 // ---------- 설정 ----------
+function viewSync() {
+  if (sync.status === 'off') {
+    return `
+      <section class="card" id="sync">
+        <h2>☁️ 가족 공유 (클라우드 동기화)</h2>
+        <p class="muted small">아직 Firebase 설정이 연결되지 않았어요. 연결되면 구글 로그인으로 여러 기기에서 같은 기록을 볼 수 있어요.</p>
+      </section>`;
+  }
+  const err = sync.error ? `<p class="sync-err">⚠️ ${esc(sync.error)}</p>` : '';
+  let body;
+  if (sync.status === 'loading') {
+    body = '<p class="muted"><span class="spin"></span> 연결 중…</p>';
+  } else if (!sync.user) {
+    body = `
+      <p class="muted small">구글 계정으로 로그인하면 이 기록을 클라우드에 저장하고, 가족과 실시간으로 함께 쓸 수 있어요.</p>
+      ${ui.joinCode ? '<p class="small"><b>초대 링크로 들어왔어요.</b> 로그인하면 바로 참여할 수 있어요.</p>' : ''}
+      <button class="primary full" data-action="sync-login">Google로 로그인</button>`;
+  } else if (!sync.householdId) {
+    body = `
+      <p class="small">👤 ${esc(sync.user.name)} <button class="ghost sm" data-action="sync-logout">로그아웃</button></p>
+      <div class="sync-choice">
+        <div>
+          <h3>처음 시작하는 기기라면</h3>
+          <p class="muted small">이 기기의 지금 기록으로 공유 공간을 만들어요.</p>
+          <button class="primary full" data-action="sync-create">공유 공간 만들기</button>
+        </div>
+        <div>
+          <h3>가족이 이미 만들었다면</h3>
+          <p class="muted small">받은 초대 코드를 넣으세요. 이 기기 기록은 공유 공간 기록으로 바뀌어요.</p>
+          <input id="join-code" placeholder="초대 코드" value="${esc(ui.joinCode)}" autocomplete="off" autocapitalize="off">
+          <button class="accent full" data-action="sync-join">참여하기</button>
+        </div>
+      </div>`;
+  } else {
+    const [cls, text] = SYNC_LABEL[sync.status] || ['', ''];
+    body = `
+      <p class="small">👤 ${esc(sync.user.name)} · <span class="badge ${cls}">${text}</span>${sync.updatedBy ? ` <span class="muted">마지막 저장: ${esc(sync.updatedBy)}</span>` : ''}</p>
+      <label class="small muted">초대 코드
+        <div class="code-row"><input readonly value="${esc(sync.householdId)}" aria-label="초대 코드"><button class="ghost sm" data-action="copy-invite">링크 복사</button></div>
+      </label>
+      <p class="muted small">가족에게 링크를 보내면, 구글 로그인 후 같은 기록을 함께 써요. 링크는 가족에게만 공유하세요.</p>
+      <div class="btn-row wrap">
+        <button class="ghost" data-action="sync-leave">이 기기 공유 끊기</button>
+        <button class="ghost" data-action="sync-logout">로그아웃</button>
+      </div>`;
+  }
+  return `<section class="card" id="sync"><h2>☁️ 가족 공유 (클라우드 동기화)</h2>${err}${body}</section>`;
+}
+
 function viewSettings() {
   const num = (key, label, min, max, hint = '') => `
     <label>${label}<input type="number" min="${min}" max="${max}" step="1" value="${S()[key]}" data-change="setting" data-key="${key}" inputmode="numeric">${hint ? `<small>${hint}</small>` : ''}</label>`;
   return `
+    ${viewSync()}
     <section class="card">
       <h2>아기 정보</h2>
       <div class="form-grid">
@@ -400,7 +491,7 @@ function viewSettings() {
     </section>
     <section class="card">
       <h2>데이터</h2>
-      <p class="muted small">데이터는 이 기기 브라우저에 저장돼요. 다른 기기로 옮기거나 백업하려면 내보내기/가져오기를 사용하세요.</p>
+      <p class="muted small">데이터는 이 기기 브라우저에 저장되고, 가족 공유를 켜면 클라우드에도 저장돼요. 내보내기로 백업 파일을 따로 받아둘 수 있어요.</p>
       <div class="btn-row wrap">
         <button class="ghost" data-action="export">📤 내보내기</button>
         <label class="ghost button">📥 가져오기<input type="file" accept="application/json" data-change="import" hidden></label>
@@ -579,6 +670,51 @@ const actions = {
     commit();
     toast('예시 큐브를 추가했어요.');
   },
+  'goto-sync'() {
+    ui.tab = 'settings';
+    render();
+    document.getElementById('sync')?.scrollIntoView({ behavior: 'smooth' });
+  },
+  'sync-login'() {
+    sync.error = null;
+    signIn();
+  },
+  async 'sync-logout'() {
+    await signOutSync();
+  },
+  async 'sync-create'() {
+    try {
+      await createHousehold(state);
+      toast('공유 공간을 만들었어요. 초대 링크를 가족에게 보내세요.');
+    } catch (e) {
+      toast(`만들지 못했어요: ${e.code || e.message}`, 'bad');
+    }
+  },
+  async 'sync-join'() {
+    const code = $('#join-code')?.value.trim();
+    if (!code) return toast('초대 코드를 입력해주세요.', 'bad');
+    if (state.cubes.length && !confirm('참여하면 이 기기의 기록이 공유 공간 기록으로 바뀌어요. 계속할까요?')) return;
+    if (await joinHousehold(code)) {
+      ui.joinCode = '';
+      toast('공유 공간에 참여했어요!');
+    }
+  },
+  'sync-leave'() {
+    if (!confirm('이 기기만 공유를 끊어요. 기록은 이 기기에 그대로 남고, 다른 가족 기기에는 영향이 없어요.')) return;
+    leaveHousehold();
+  },
+  async 'copy-invite'() {
+    const link = inviteLink();
+    try {
+      if (navigator.share) await navigator.share({ title: '이유식 큐브 초대', url: link });
+      else {
+        await navigator.clipboard.writeText(link);
+        toast('초대 링크를 복사했어요.');
+      }
+    } catch {
+      prompt('아래 링크를 복사해서 보내세요', link);
+    }
+  },
   reset() {
     if (!confirm('모든 큐브·식단·기록을 지울까요? (API 키는 유지)')) return;
     state = defaultState();
@@ -631,8 +767,7 @@ const changes = {
         const data = JSON.parse(txt);
         if (!Array.isArray(data.cubes)) throw new Error();
         if (!confirm('지금 데이터를 백업 파일 내용으로 바꿀까요?')) return;
-        const d = defaultState();
-        state = { ...d, ...data, baby: { ...d.baby, ...data.baby }, settings: { ...d.settings, ...data.settings } };
+        state = normalizeState(data);
         commit();
         toast('가져왔어요.');
       } catch {
@@ -689,3 +824,17 @@ document.addEventListener('submit', (e) => {
 });
 
 render();
+initSync({
+  getState: () => state,
+  onRemote(remote) {
+    state = normalizeState(remote);
+    saveState(state);
+    safeRender();
+  },
+  onChange() {
+    renderHeader();
+    if (ui.tab === 'settings') safeRender();
+    if (sync.error && sync.error !== ui.lastSyncError) toast(sync.error, 'bad');
+    ui.lastSyncError = sync.error;
+  },
+});

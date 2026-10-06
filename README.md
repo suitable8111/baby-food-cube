@@ -23,6 +23,13 @@
 - 브라우저 localStorage에 저장. 설정 → 내보내기/가져오기로 백업·기기 이동
 - Claude API 키는 해당 기기에만 저장되며 백업 파일에 포함되지 않음
 
+### 가족 공유 (Firebase)
+- 구글 로그인 후 “공유 공간”을 만들고 초대 링크로 가족이 참여 → 모든 기기 실시간 동기화
+- Firestore `households/{초대코드}` 문서 하나에 앱 상태 전체를 저장 (마지막 저장 우선)
+- 오프라인에서 바꾼 내용은 다시 연결되면 올라감
+- 설정: `web/js/firebase-config.js`에 웹앱 설정값, Firestore 규칙은 `firestore.rules` 내용을 콘솔에 붙여넣기
+- Authentication → 승인된 도메인에 `suitable8111.github.io` 추가 필요
+
 ## 개발
 
 ```bash

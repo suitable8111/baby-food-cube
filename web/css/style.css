@@ -219,6 +219,23 @@ input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 0; 
 .recipe > button { align-self: flex-start; }
 .lock { font-size: 40px; }
 
+/* sync */
+.sync-chip {
+  font-family: 'Noto Sans KR', sans-serif; font-size: 11px; font-weight: 700; vertical-align: 3px;
+  min-height: 0; padding: 2px 8px; border-radius: 99px; background: var(--line); color: var(--muted);
+}
+.sync-chip.ok { background: var(--ok-soft); color: var(--ok); }
+.sync-chip.mid { background: var(--mid-soft); color: var(--mid); }
+.sync-chip.warn { background: var(--warn-soft); color: var(--warn); }
+.sync-chip.bad { background: var(--bad-soft); color: var(--bad); }
+.sync-err { background: var(--bad-soft); color: var(--bad); border-radius: 10px; padding: 8px 12px; font-size: 13px; margin: 0 0 10px; }
+.sync-choice { display: grid; gap: 12px; margin-top: 8px; }
+@media (min-width: 640px) { .sync-choice { grid-template-columns: 1fr 1fr; } }
+.sync-choice > div { border: 1px solid var(--line); border-radius: 14px; padding: 12px; display: flex; flex-direction: column; gap: 8px; background: var(--bg); }
+.sync-choice p { margin: 0; }
+.code-row { display: flex; gap: 6px; margin-top: 4px; }
+.code-row input { font-family: ui-monospace, monospace; font-size: 13px; }
+
 /* nav */
 .nav {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 10;

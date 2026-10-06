@@ -13,14 +13,16 @@ export function defaultState() {
   };
 }
 
+/** 예전 버전·다른 기기에서 온 데이터에 빠진 필드를 기본값으로 채운다 */
+export function normalizeState(s) {
+  const d = defaultState();
+  return { ...d, ...s, baby: { ...d.baby, ...s.baby }, settings: { ...d.settings, ...s.settings } };
+}
+
 export function loadState() {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) {
-      const s = JSON.parse(raw);
-      const d = defaultState();
-      return { ...d, ...s, baby: { ...d.baby, ...s.baby }, settings: { ...d.settings, ...s.settings } };
-    }
+    if (raw) return normalizeState(JSON.parse(raw));
   } catch (e) {
     console.warn('저장된 데이터를 읽지 못했습니다', e);
   }
