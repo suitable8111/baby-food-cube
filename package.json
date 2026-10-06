@@ -1,0 +1,11 @@
+{
+  "name": "baby-food-cube",
+  "version": "1.0.0",
+  "private": true,
+  "description": "이유식 큐브 재고 관리 및 식단 추천 웹앱",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/logic.test.mjs",
+    "start": "npx --yes serve web -l 5173"
+  }
+}

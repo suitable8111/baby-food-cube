@@ -1,0 +1,11 @@
+{
+  "name": "이유식 큐브",
+  "short_name": "이유식큐브",
+  "description": "이유식 큐브 재고 관리와 식단 추천",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fffaf5",
+  "theme_color": "#f6a46b",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
