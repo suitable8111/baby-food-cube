@@ -159,24 +159,32 @@ export class Allocator {
   }
 }
 
+const L = (cat) => CATEGORIES[cat].label;
+const other = (cat) => (cat === 'chicken' ? 'fish' : 'chicken');
+
+/** 저녁 단백질 선택. { cat, why } — why는 화면에 보여줄 선택 이유 */
 function pickDinnerProtein(alloc, date, need, lastDinner) {
   const ok = ['chicken', 'fish'].filter((cat) => alloc.usableQty(date, (c) => c.category === cat) >= need);
   if (ok.length === 0) {
     // 둘 다 부족하면 남은 쪽이라도 사용
     const any = ['chicken', 'fish'].filter((cat) => alloc.usableQty(date, (c) => c.category === cat) > 0);
-    return any[0] || null;
+    return any[0] ? { cat: any[0], why: `닭고기·생선 모두 부족해 남은 ${L(any[0])} 사용` } : { cat: null, why: '' };
   }
-  if (ok.length === 1) return ok[0];
+  if (ok.length === 1) return { cat: ok[0], why: `${L(other(ok[0]))} 재고가 없어 ${L(ok[0])}` };
   // 둘 다 가능: 2일 이내 소비기한 임박한 쪽 우선, 아니면 전날과 번갈아
   const urgent = ok.filter((cat) => diffDays(date, alloc.earliestExpiry(date, (c) => c.category === cat)) <= 2);
-  if (urgent.length === 1) return urgent[0];
+  if (urgent.length === 1) return { cat: urgent[0], why: `${L(urgent[0])} 소비기한이 임박해 먼저` };
   if (urgent.length === 2) {
     const [a, b] = urgent.map((cat) => alloc.earliestExpiry(date, (c) => c.category === cat));
-    if (a !== b) return a < b ? 'chicken' : 'fish';
+    if (a !== b) {
+      const cat = a < b ? 'chicken' : 'fish';
+      return { cat, why: `둘 다 임박, 기한이 더 빠른 ${L(cat)} 먼저` };
+    }
   }
-  if (lastDinner === 'chicken') return 'fish';
-  if (lastDinner === 'fish') return 'chicken';
-  return 'chicken';
+  if (lastDinner === 'chicken' || lastDinner === 'fish') {
+    return { cat: other(lastDinner), why: `전날 저녁 ${L(lastDinner)} → 번갈아 ${L(other(lastDinner))}` };
+  }
+  return { cat: 'chicken', why: '닭고기부터 시작해 생선과 번갈아' };
 }
 
 function pickVeg(alloc, date, s, avoidNames, usedToday) {
@@ -201,18 +209,38 @@ function pickVeg(alloc, date, s, avoidNames, usedToday) {
 export function composeMeal(alloc, date, meal, ctx = {}) {
   const s = alloc.settings;
   const items = [...alloc.take(date, 'rice', s.riceCubesPerMeal)];
+  const reasons = [];
   let protein = null;
   if (meal === 'lunch') {
     protein = 'beef';
     items.push(...alloc.take(date, 'beef', s.proteinCubesPerMeal));
   } else if (meal === 'dinner') {
-    protein = pickDinnerProtein(alloc, date, s.proteinCubesPerMeal, ctx.lastDinner);
+    const pick = pickDinnerProtein(alloc, date, s.proteinCubesPerMeal, ctx.lastDinner);
+    protein = pick.cat;
+    if (pick.why) reasons.push(pick.why);
     if (protein) items.push(...alloc.take(date, protein, s.proteinCubesPerMeal, { missingLabel: '닭고기/생선' }));
     else items.push({ missing: true, category: 'chicken', name: '닭고기/생선', qty: s.proteinCubesPerMeal });
   }
   items.push(...pickVeg(alloc, date, s, ctx.avoidVeg || new Set(), ctx.usedToday || new Map()));
   if (meal === 'breakfast' && s.fruitAtBreakfast) items.push(...alloc.take(date, 'fruit', 1, { optional: true }));
-  return { items, protein };
+
+  // 이 끼니 구성의 이유 (소비기한 임박·부족)
+  const urgent = new Set();
+  for (const it of items) {
+    if (it.missing) {
+      reasons.push(`${it.name} 재고 부족 — 큐브를 만들어야 해요`);
+      continue;
+    }
+    const c = alloc.cubes.find((x) => x.id === it.cubeId);
+    const n = c ? daysLeft(c, date, s.shelfDays) : 99;
+    if (n <= 2 && !urgent.has(it.name)) {
+      urgent.add(it.name);
+      reasons.push(`${it.name} 기한 ${n === 0 ? '오늘까지' : `D-${n}`} → 먼저 사용`);
+    }
+  }
+  const vegs = items.filter((it) => it.category === 'veg' && !it.missing).map((it) => it.name);
+  if (ctx.avoidVeg?.size && vegs.length && vegs.every((n) => !ctx.avoidVeg.has(n))) reasons.push('앞 끼니와 다른 채소로 구성');
+  return { items, protein, reasons };
 }
 
 /**
@@ -234,11 +262,11 @@ export function buildPlan({ cubes, settings, birth, startDate, days, reserved = 
     const usedToday = new Map([...prevVeg].map((n) => [n, 1]));
     for (const meal of mealsForDate(birth, date)) {
       if ((skipMeals[date] || []).includes(meal)) continue;
-      const { items, protein } = composeMeal(alloc, date, meal, { lastDinner, avoidVeg: prevVeg, usedToday });
+      const { items, protein, reasons } = composeMeal(alloc, date, meal, { lastDinner, avoidVeg: prevVeg, usedToday });
       if (meal === 'dinner' && protein) lastDinner = protein;
       prevVeg = new Set(items.filter((it) => it.category === 'veg' && !it.missing).map((it) => it.name));
       for (const n of prevVeg) usedToday.set(n, (usedToday.get(n) || 0) + 1);
-      meals[meal] = { items, done: false };
+      meals[meal] = { items, done: false, comment: reasons.join(' · ') };
     }
     out.push({ date, meals });
   }

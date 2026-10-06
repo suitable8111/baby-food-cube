@@ -1,10 +1,76 @@
-// Claude API로 식단/레시피를 추천받는다.
+// AI(Claude 또는 Gemini)로 식단/레시피를 추천받는다.
 // 정적 사이트라 서버가 없으므로, 사용자가 설정에 입력한 본인 API 키로 브라우저에서 직접 호출한다.
+// 두 제공자 모두 JSON 스키마로 응답 형식을 강제하고, 결과는 앱이 다시 검증·보정한다.
 import {
   Allocator, CATEGORIES, MEALS, addDays, ageInfo, expiryDate, isUsable, mealsForDate,
 } from './logic.js';
 
 const SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk/+esm';
+const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+
+export const PROVIDERS = { claude: 'Claude', gemini: 'Gemini' };
+
+export function aiKey(ai) {
+  return ai.provider === 'gemini' ? ai.geminiKey : ai.apiKey;
+}
+
+function callAI(ai, req) {
+  return ai.provider === 'gemini' ? callGemini(ai, req) : callClaude(ai, req);
+}
+
+/** JSON Schema → Gemini responseSchema(OpenAPI 부분집합) 변환 */
+function toGeminiSchema(s) {
+  const out = { type: s.type.toUpperCase() };
+  if (s.enum) Object.assign(out, { format: 'enum', enum: s.enum });
+  if (s.properties) {
+    out.properties = Object.fromEntries(Object.entries(s.properties).map(([k, v]) => [k, toGeminiSchema(v)]));
+    out.required = s.required;
+    out.propertyOrdering = Object.keys(s.properties);
+  }
+  if (s.items) out.items = toGeminiSchema(s.items);
+  return out;
+}
+
+async function callGemini(ai, { system, user, schema }) {
+  if (!ai.geminiKey) throw new Error('설정에서 Gemini API 키를 먼저 입력해주세요.');
+  const model = ai.geminiModel || 'gemini-2.5-flash';
+  let res;
+  try {
+    res = await fetch(`${GEMINI_URL}/${encodeURIComponent(model)}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': ai.geminiKey },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts: [{ text: user }] }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: toGeminiSchema(schema),
+          maxOutputTokens: 16384,
+        },
+      }),
+    });
+  } catch {
+    throw new Error('Gemini API에 연결하지 못했습니다. 네트워크를 확인해주세요.');
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data.error?.message || res.statusText;
+    if (res.status === 400 && /API key/i.test(msg)) throw new Error('Gemini API 키가 올바르지 않습니다.');
+    if (res.status === 403) throw new Error('Gemini API 키 권한이 없습니다. AI Studio에서 키를 확인해주세요.');
+    if (res.status === 404) throw new Error(`Gemini 모델 '${model}'을 찾을 수 없습니다. 설정에서 모델 이름을 확인해주세요.`);
+    if (res.status === 429) throw new Error('Gemini 요청 한도를 넘었습니다. 잠시 후 다시 시도해주세요.');
+    throw new Error(`Gemini API 오류 (${res.status}): ${msg}`);
+  }
+  if (data.promptFeedback?.blockReason) throw new Error('AI가 이 요청에 답하지 않았습니다. 자동 추천을 사용해주세요.');
+  const cand = data.candidates?.[0];
+  if (cand?.finishReason === 'MAX_TOKENS') throw new Error('응답이 너무 길어 잘렸습니다. 추천 일수를 줄여주세요.');
+  if (cand?.finishReason && !['STOP', 'FINISH_REASON_UNSPECIFIED'].includes(cand.finishReason)) {
+    throw new Error(`AI 응답이 중단되었습니다 (${cand.finishReason}). 자동 추천을 사용해주세요.`);
+  }
+  const text = cand?.content?.parts?.filter((p) => p.text && !p.thought).map((p) => p.text).join('');
+  if (!text) throw new Error('AI 응답이 비어 있습니다.');
+  return JSON.parse(text);
+}
 
 async function callClaude(ai, { system, user, schema }) {
   if (!ai.apiKey) throw new Error('설정에서 Claude API 키를 먼저 입력해주세요.');
@@ -55,7 +121,8 @@ const SYSTEM_PLAN = `당신은 영유아 이유식 영양사입니다. 부모가
 - 모든 날짜를 합친 큐브 사용량이 available을 넘으면 안 됩니다.
 - 소비기한이 임박한 큐브를 먼저 쓰고, 같은 날 같은 채소가 반복되지 않게 다양하게 구성합니다.
 - 끼니별 기본 수량은 사용자가 준 값을 따르되, 재고 상황에 맞게 조정할 수 있습니다.
-comment에는 그 끼니의 영양 포인트나 먹이는 팁을 한국어 한 문장으로 적습니다.`;
+comment에는 이 끼니 조합을 고른 이유(소비기한·재고·영양 균형·맛 궁합 중 해당하는 것)를 한국어 한 문장으로 적습니다.
+summary에는 전체 식단을 이렇게 구성한 이유와, 재고가 부족해 곧 만들어야 할 큐브가 있다면 그 내용을 한국어 2~3문장으로 적습니다.`;
 
 /** AI 식단을 받아 앱 식단 형식으로 변환. 규칙 위반·재고 초과는 자동 보정하고 경고로 알려준다. */
 export async function aiPlan(state, ai, { startDate, days, reserved }) {
@@ -115,7 +182,7 @@ export async function aiPlan(state, ai, { startDate, days, reserved }) {
     perMeal: { riceCubes: s.riceCubesPerMeal, proteinCubes: s.proteinCubesPerMeal, vegKinds: s.vegKindsPerMeal, vegCubesEach: s.vegCubesEach },
     inventory,
   });
-  const res = await callClaude(ai, { system: SYSTEM_PLAN, user, schema });
+  const res = await callAI(ai, { system: SYSTEM_PLAN, user, schema });
 
   // 검증 및 보정
   const alloc = new Allocator(state.cubes, s, reserved);
@@ -150,7 +217,7 @@ export async function aiPlan(state, ai, { startDate, days, reserved }) {
       if (meal === 'dinner' && !has(['chicken', 'fish'])) fix('protein');
       meals[meal] = { items: mergeItems(items), done: false, comment: aiMeal?.comment || '' };
     }
-    plans[date] = { meals, source: 'ai' };
+    plans[date] = { meals, source: 'ai', provider: ai.provider || 'claude' };
   }
   return { plans, summary: res.summary, warnings };
 }
@@ -210,7 +277,7 @@ export async function aiRecipes(state, ai, { date, reserved }) {
     },
   };
   const age = ageInfo(state.baby.birth, date);
-  const res = await callClaude(ai, {
+  const res = await callAI(ai, {
     system: SYSTEM_RECIPE,
     user: JSON.stringify({ baby: { ageMonths: age.months }, date, inventory }),
     schema,

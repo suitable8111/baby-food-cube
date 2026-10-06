@@ -4,7 +4,7 @@ import {
   applyConsumption, restoreConsumption,
 } from './logic.js';
 import { loadState, saveState, loadAi, saveAi, defaultState, normalizeState, uid } from './store.js';
-import { aiPlan, aiRecipes } from './ai.js';
+import { aiPlan, aiRecipes, aiKey, PROVIDERS } from './ai.js';
 import {
   sync, initSync, pushState, signIn, signOutSync, createHousehold, joinHousehold, leaveHousehold, inviteLink,
 } from './sync.js';
@@ -321,6 +321,36 @@ function expiryText(made) {
 }
 
 // ---------- 식단 ----------
+/** 자동 추천 / AI 추천이 각각 왜 이렇게 설계됐는지 */
+function viewRationale() {
+  const s = S();
+  return `
+    <details class="why">
+      <summary>왜 이렇게 추천하나요?</summary>
+      <h3>⚡ 자동 추천 (규칙 기반)</h3>
+      <p class="small muted">인터넷·API 키 없이 항상 같은 기준으로 동작해요. 기록용 앱이라 <b>예측 가능하고 재고와 정확히 맞는 것</b>을 우선했어요.</p>
+      <table class="why-table">
+        <tr><th>매끼 밥 ${s.riceCubesPerMeal}개</th><td>탄수화물은 이유식의 주 에너지원이라 모든 끼니의 기본으로 고정했어요.</td></tr>
+        <tr><th>점심 = 소고기</th><td>생후 6개월 무렵부터 몸에 저장된 철분이 줄어들어, 흡수가 잘 되는 소고기(헴철)를 <b>매일</b> 먹이는 것이 일반적인 권장이에요. 점심에 고정하면 하루도 빠지지 않고, 낮에 먹여서 소화나 피부 반응도 살펴보기 쉬워요.</td></tr>
+        <tr><th>저녁 = 닭고기 또는 생선</th><td>소고기와 겹치지 않게 단백질 종류를 다양하게 하고, 흰살생선의 DHA·단백질도 챙기려는 구성이에요. 기본은 <b>전날과 번갈아</b> 주고, 한쪽 기한이 2일 이내로 남으면 그쪽을 먼저 써요.</td></tr>
+        <tr><th>채소 ${s.vegKindsPerMeal}종 × ${s.vegCubesEach}개</th><td>비타민·식이섬유를 채우고 여러 맛에 익숙해지게 하려는 구성이에요. 같은 날 앞 끼니와 다른 채소를 우선 골라요.</td></tr>
+        <tr><th>소비기한 임박 순</th><td>만든 날 포함 ${s.shelfDays}일 원칙을 지키려고, 기한이 가장 빠른 큐브부터 써서(선입선출) 버리는 큐브를 줄여요.</td></tr>
+        <tr><th>기한 지난 큐브 제외</th><td>안전을 위해 기한이 지난 큐브는 절대 추천하지 않고 폐기 알림을 띄워요.</td></tr>
+        <tr><th>9개월부터 아침 추가</th><td>후기 이유식(9개월~)부터는 하루 3끼가 일반적이라, 9개월이 되는 날(${shortDate(nineMonthDate(state.baby.birth))})부터 자동으로 아침이 들어가요.${s.fruitAtBreakfast ? ' 아침에는 가볍게 과일 큐브를 곁들여요.' : ''}</td></tr>
+        <tr><th>끼니 양</th><td>정해진 정답이 없어서 설정에서 끼니당 큐브 수를 조절할 수 있게 했어요. 아기가 먹는 양에 맞춰 바꿔주세요.</td></tr>
+      </table>
+      <h3>✨ AI 추천 (Claude / Gemini)</h3>
+      <p class="small muted">위와 <b>같은 규칙</b>을 AI에게 알려주고, 규칙만으로는 하기 어려운 판단을 맡겨요.</p>
+      <table class="why-table">
+        <tr><th>쓰는 이유</th><td>재고 전체를 보고 맛 궁합·영양 균형을 고려해 조합하고, 재고가 애매할 때 수량을 유연하게 나눠요. 끼니마다 고른 이유와 전체 요약도 설명해줘요.</td></tr>
+        <tr><th>안전장치</th><td>AI는 실제로 있는 큐브 ID 중에서만 고르도록 형식을 강제해요. 결과가 오면 앱이 기한·재고·필수 규칙(밥/소고기/닭·생선)을 <b>다시 검사</b>하고, 틀린 부분은 자동으로 고친 뒤 보정한 내용을 알려줘요.</td></tr>
+        <tr><th>Claude / Gemini</th><td>둘 중 가진 키로 선택할 수 있어요. Claude Opus 5.5는 꼼꼼한 판단, Gemini Flash는 빠르고 저렴한 쪽이에요.</td></tr>
+        <tr><th>API 키</th><td>서버 없는 앱이라 본인 키로 브라우저에서 바로 호출해요. 키는 이 기기에만 저장되고 클라우드 공유·백업 파일에는 들어가지 않아요.</td></tr>
+      </table>
+      <p class="small muted">※ 일반적인 이유식 가이드를 바탕으로 한 기본값이에요. 아기 상태에 따른 판단은 소아과 상담을 우선해주세요.</p>
+    </details>`;
+}
+
 function viewPlan() {
   const dates = Object.keys(state.plans)
     .filter((d) => d >= addDays(today, -2))
@@ -332,7 +362,7 @@ function viewPlan() {
       return `
       <div class="day ${d === today ? 'is-today' : ''}">
         <div class="day-head">
-          <h3>${shortDate(d)} <small>${relDay(d)}</small> ${p.source === 'ai' ? '<span class="badge ai">AI</span>' : ''}</h3>
+          <h3>${shortDate(d)} <small>${relDay(d)}</small> ${p.source === 'ai' ? `<span class="badge ai">AI · ${PROVIDERS[p.provider] || 'Claude'}</span>` : '<span class="badge">자동</span>'}</h3>
           <button class="ghost sm" data-action="del-plan" data-date="${d}">삭제</button>
         </div>
         <div class="meals">${mealKeys(p.meals).map((k) => renderMeal(d, k, p.meals[k])).join('')}</div>
@@ -353,8 +383,15 @@ function viewPlan() {
         <button class="primary" data-action="gen-rule" ${ui.busy ? 'disabled' : ''}>⚡ 자동 추천</button>
         <button class="accent" data-action="gen-ai" ${ui.busy ? 'disabled' : ''}>${ui.busy === 'plan' ? '<span class="spin"></span> AI가 고민 중…' : '✨ AI 추천'}</button>
       </div>
-      <p class="muted small">이미 먹은 끼니는 유지되고, 아직 안 먹은 끼니만 새로 짜요.</p>
+      <p class="muted small">AI: <b>${PROVIDERS[ai.provider]}</b> (설정에서 변경) · 이미 먹은 끼니는 유지되고, 아직 안 먹은 끼니만 새로 짜요. 각 끼니의 💡는 그 조합을 고른 이유예요.</p>
+      ${viewRationale()}
     </section>
+    ${ui.aiSummary ? `
+    <section class="card ai-summary">
+      <div class="row-between"><h2>✨ AI 추천 이유</h2><button class="ghost sm" data-action="close-summary">닫기</button></div>
+      <p>${esc(ui.aiSummary.summary)}</p>
+      ${ui.aiSummary.warnings.length ? `<details><summary class="small muted">앱이 규칙에 맞게 보정한 내용 ${ui.aiSummary.warnings.length}건</summary><ul class="small">${ui.aiSummary.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></details>` : ''}
+    </section>` : ''}
     ${missingCount ? `<section class="card warn-card">⚠️ 재고가 부족한 끼니가 ${missingCount}개 있어요. 큐브를 더 만들어 등록한 뒤 다시 추천받으세요.</section>` : ''}
     ${days || '<section class="card empty">아직 식단이 없어요. 위에서 추천을 받아보세요.</section>'}`;
 }
@@ -478,16 +515,27 @@ function viewSettings() {
       </div>
     </section>
     <section class="card">
-      <h2>AI 추천 (Claude)</h2>
-      <p class="muted small">AI 추천을 쓰려면 <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Anthropic Console</a>에서 발급한 API 키가 필요해요. 키는 이 기기 브라우저에만 저장되고 백업 파일에는 포함되지 않아요. 키 없이도 ⚡ 자동 추천은 그대로 쓸 수 있어요.</p>
+      <h2>AI 추천</h2>
+      <p class="muted small">사용할 AI를 고르고 해당 API 키를 넣어주세요. 키는 이 기기 브라우저에만 저장되고 클라우드 공유·백업 파일에는 포함되지 않아요. 키 없이도 ⚡ 자동 추천은 그대로 쓸 수 있어요.</p>
+      <div class="seg" role="radiogroup" aria-label="AI 선택">
+        ${Object.entries(PROVIDERS).map(([k, l]) => `<button role="radio" aria-checked="${ai.provider === k}" class="${ai.provider === k ? 'on' : ''}" data-action="ai-provider" data-p="${k}">${l}${aiKey({ ...ai, provider: k }) ? ' ✓' : ''}</button>`).join('')}
+      </div>
+      ${ai.provider === 'gemini' ? `
+      <p class="muted small">키 발급: <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio → API 키</a></p>
       <div class="form-grid">
-        <label class="wide">API 키<input type="password" value="${esc(ai.apiKey)}" placeholder="sk-ant-..." data-change="ai" data-key="apiKey" autocomplete="off"></label>
-        <label>모델
+        <label class="wide">Gemini API 키<input type="password" value="${esc(ai.geminiKey)}" placeholder="AIza..." data-change="ai" data-key="geminiKey" autocomplete="off"></label>
+        <label class="wide">모델<input value="${esc(ai.geminiModel)}" list="gemini-models" data-change="ai" data-key="geminiModel" autocomplete="off"><small>목록에 없는 최신 모델 이름도 입력할 수 있어요</small></label>
+        <datalist id="gemini-models"><option value="gemini-2.5-flash"><option value="gemini-2.5-pro"><option value="gemini-2.5-flash-lite"></datalist>
+      </div>` : `
+      <p class="muted small">키 발급: <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Anthropic Console → API Keys</a></p>
+      <div class="form-grid">
+        <label class="wide">Claude API 키<input type="password" value="${esc(ai.apiKey)}" placeholder="sk-ant-..." data-change="ai" data-key="apiKey" autocomplete="off"></label>
+        <label class="wide">모델
           <select data-change="ai" data-key="model">
             ${[['claude-opus-5-5', 'Claude Opus 5.5 (기본)'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 (저렴)']].map(([v, l]) => `<option value="${v}" ${ai.model === v ? 'selected' : ''}>${l}</option>`).join('')}
           </select>
         </label>
-      </div>
+      </div>`}
     </section>
     <section class="card">
       <h2>데이터</h2>
@@ -545,8 +593,8 @@ const actions = {
   },
   async 'gen-ai'() {
     if (!ensureCubes()) return;
-    if (!ai.apiKey) {
-      toast('설정에서 API 키를 입력해주세요.', 'bad');
+    if (!aiKey(ai)) {
+      toast(`설정에서 ${PROVIDERS[ai.provider]} API 키를 입력해주세요.`, 'bad');
       ui.tab = 'settings';
       return render();
     }
@@ -558,8 +606,8 @@ const actions = {
       const res = await aiPlan(state, ai, { startDate: ui.planStart, days: ui.planDays, reserved });
       for (const [d, p] of Object.entries(res.plans)) mergeDay(d, p.meals, 'ai');
       saveState(state);
+      ui.aiSummary = { summary: res.summary, warnings: res.warnings };
       toast(res.warnings.length ? `AI 식단 완료 (자동 보정 ${res.warnings.length}건)` : 'AI 식단을 짰어요.');
-      if (res.warnings.length) console.info(res.warnings.join('\n'));
     } catch (e) {
       toast(e.message, 'bad');
     } finally {
@@ -625,8 +673,8 @@ const actions = {
     render();
   },
   async 'ai-recipe'() {
-    if (!ai.apiKey) {
-      toast('설정에서 API 키를 입력해주세요.', 'bad');
+    if (!aiKey(ai)) {
+      toast(`설정에서 ${PROVIDERS[ai.provider]} API 키를 입력해주세요.`, 'bad');
       ui.tab = 'settings';
       return render();
     }
@@ -669,6 +717,15 @@ const actions = {
     );
     commit();
     toast('예시 큐브를 추가했어요.');
+  },
+  'ai-provider'(el) {
+    ai.provider = el.dataset.p;
+    saveAi(ai);
+    render();
+  },
+  'close-summary'() {
+    ui.aiSummary = null;
+    render();
   },
   'goto-sync'() {
     ui.tab = 'settings';

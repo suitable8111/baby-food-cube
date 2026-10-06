@@ -38,11 +38,12 @@ export function saveState(state) {
 }
 
 // API 키는 백업 파일에 섞이지 않도록 별도 키에 저장
+const AI_DEFAULTS = { provider: 'claude', apiKey: '', model: 'claude-opus-5-5', geminiKey: '', geminiModel: 'gemini-2.5-flash' };
 export function loadAi() {
   try {
-    return { apiKey: '', model: 'claude-opus-5-5', ...JSON.parse(localStorage.getItem(KEY_AI) || '{}') };
+    return { ...AI_DEFAULTS, ...JSON.parse(localStorage.getItem(KEY_AI) || '{}') };
   } catch {
-    return { apiKey: '', model: 'claude-opus-5-5' };
+    return { ...AI_DEFAULTS };
   }
 }
 export function saveAi(ai) {

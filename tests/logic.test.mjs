@@ -48,6 +48,22 @@ test('식단 규칙: 매끼 밥, 점심 소고기, 저녁 닭/생선', () => {
   // 저녁 단백질은 번갈아
   const dinners = days.map((d) => d.meals.dinner.items.find((it) => ['chicken', 'fish'].includes(it.category)).category);
   assert.notEqual(dinners[0], dinners[1]);
+  // 선택 이유가 남는다
+  assert.match(days[1].meals.dinner.comment, /번갈아/);
+});
+
+test('소비기한 임박 큐브는 이유와 함께 먼저 사용', () => {
+  const cubes = [
+    cube('r', '쌀밥', 'rice', '2026-10-06', 10),
+    cube('b', '소고기', 'beef', '2026-10-06', 5),
+    cube('v1', '애호박', 'veg', '2026-10-06', 5),
+    cube('v2', '당근', 'veg', '2026-10-06', 5),
+    cube('v3', '브로콜리', 'veg', '2026-09-25', 5), // 10/08 만료 → 10/06 기준 D-2
+  ];
+  const { days } = buildPlan({ cubes, settings: {}, birth: BIRTH, startDate: '2026-10-06', days: 1 });
+  const lunch = days[0].meals.lunch;
+  assert.ok(lunch.items.some((it) => it.name === '브로콜리'));
+  assert.match(lunch.comment, /브로콜리 기한 D-2/);
 });
 
 test('9개월 이후 3끼, 소비기한 지난 큐브는 사용 안 함', () => {
