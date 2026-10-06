@@ -4,6 +4,7 @@ import {
   ageInfo, mealsForDate, nineMonthDate, expiryDate, buildPlan, forecast,
   matchRecipes, applyConsumption, restoreConsumption, guessCategory, addMonths,
 } from '../web/js/logic.js';
+import { scoreCombo } from '../web/js/nutrition.js';
 
 const BIRTH = '2026-02-25';
 const cube = (id, name, category, madeDate, count) => ({ id, name, category, madeDate, sizeG: 30, count, initialCount: count });
@@ -87,6 +88,41 @@ test('소진 예측', () => {
   assert.equal(f.categories.beef.stockOut, '2026-10-09');
   // 닭고기 20개 중 14일 내 하루 1개 → 14개 사용, 6개 폐기 예상
   assert.equal(f.waste.find((w) => w.cube.id === 'c').qty, 6);
+});
+
+test('영양 궁합: 소고기 점심엔 비타민C 채소를 골라 철분 흡수를 돕는다', () => {
+  const cubes = [
+    cube('r', '쌀밥', 'rice', '2026-10-06', 10),
+    cube('b', '소고기', 'beef', '2026-10-06', 5),
+    cube('v1', '오이', 'veg', '2026-10-05', 5), // 기한은 더 빠르지만 영양 궁합이 약함
+    cube('v2', '브로콜리', 'veg', '2026-10-06', 5),
+  ];
+  const { days } = buildPlan({ cubes, settings: { vegKindsPerMeal: 1 }, birth: BIRTH, startDate: '2026-10-06', days: 1 });
+  const lunch = days[0].meals.lunch;
+  assert.deepEqual(lunch.items.filter((i) => i.category === 'veg').map((i) => i.name), ['브로콜리']);
+  assert.match(lunch.comment, /철분 흡수/);
+});
+
+test('영양 궁합: 시금치+두부는 피할 조합, 베타카로틴+지방은 좋은 조합', () => {
+  assert.ok(scoreCombo([{ name: '두부', category: 'etc' }], ['시금치']).warnings.length > 0);
+  const r = scoreCombo([{ name: '소고기', category: 'beef' }], ['당근']);
+  assert.ok(r.reasons.some((x) => /베타카로틴/.test(x.text)));
+  // 색이 다른 조합이 같은 색 조합보다 점수가 높다
+  assert.ok(scoreCombo([], ['당근', '브로콜리']).score > scoreCombo([], ['당근', '단호박']).score);
+});
+
+test('생선 주 2회: 최근 저녁이 닭고기뿐이면 생선 우선', () => {
+  const cubes = [
+    cube('r', '쌀밥', 'rice', '2026-10-06', 10),
+    cube('c', '닭고기', 'chicken', '2026-09-25', 5), // 10/08 만료 (D-2)
+    cube('f', '대구', 'fish', '2026-10-06', 5),
+  ];
+  const { days } = buildPlan({
+    cubes, settings: {}, birth: BIRTH, startDate: '2026-10-06', days: 1, recentDinners: ['chicken', 'chicken', 'chicken', 'chicken'],
+  });
+  const dinner = days[0].meals.dinner;
+  assert.ok(dinner.items.some((i) => i.category === 'fish'));
+  assert.match(dinner.comment, /주 2회/);
 });
 
 test('레시피 매칭과 소비/복구', () => {

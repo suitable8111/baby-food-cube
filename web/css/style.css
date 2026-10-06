@@ -239,6 +239,18 @@ input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 0; 
 .seg button { flex: 1; background: transparent; color: var(--muted); min-height: 38px; }
 .seg button.on { background: var(--accent); color: #fff; }
 
+/* nutrition */
+.nutri { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 10px; }
+.nutri-label { font-size: 12px; font-weight: 700; color: var(--muted); margin-right: 4px; }
+.nchip { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--line); color: var(--muted); }
+.nchip.on { background: var(--ok-soft); color: var(--ok); font-weight: 700; }
+.nchip.soft { background: var(--mid-soft); color: var(--mid); }
+.ntags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+.ntag { font-size: 10px; padding: 0 6px; border-radius: 6px; background: var(--ok-soft); color: var(--ok); }
+.ntag.unknown { background: var(--line); color: var(--muted); }
+.pts { display: inline-block; font-size: 10px; font-weight: 700; color: var(--ok); background: var(--ok-soft); border-radius: 6px; padding: 0 5px; margin-left: 2px; }
+.pts.bad { color: var(--bad); background: var(--bad-soft); }
+
 /* sync */
 .sync-chip {
   font-family: 'Noto Sans KR', sans-serif; font-size: 11px; font-weight: 700; vertical-align: 3px;

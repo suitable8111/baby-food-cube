@@ -1,10 +1,11 @@
 import {
   CATEGORIES, MEALS, addDays, ageInfo, nineMonthDate, diffDays, todayStr, shortDate, expiryDate, daysLeft, isUsable,
-  guessCategory, reservedFromPlans, buildPlan, eatenInfo, lastDinnerProtein, forecast, matchRecipes,
+  guessCategory, reservedFromPlans, buildPlan, eatenInfo, recentDinnerProteins, forecast, matchRecipes,
   applyConsumption, restoreConsumption,
 } from './logic.js';
 import { loadState, saveState, loadAi, saveAi, defaultState, normalizeState, uid } from './store.js';
 import { aiPlan, aiRecipes, aiKey, PROVIDERS } from './ai.js';
+import { info as nInfo, nutritionCheck, NUTRIENTS, KEY_NUTRIENTS } from './nutrition.js';
 import {
   sync, initSync, pushState, signIn, signOutSync, createHousehold, joinHousehold, leaveHousehold, inviteLink,
 } from './sync.js';
@@ -149,13 +150,26 @@ function renderMeal(date, key, meal, { editable = true } = {}) {
     </div>`;
 }
 
+/** 하루 식단의 핵심 영양소 충족 표시 */
+function nutritionChips(plan) {
+  const items = Object.values(plan.meals).flatMap((m) => m.items);
+  const n = nutritionCheck(items);
+  const chips = KEY_NUTRIENTS.map((t) => `<span class="nchip ${n.tags.has(t) ? 'on' : ''}">${n.tags.has(t) ? '✓' : '·'} ${NUTRIENTS[t]}</span>`).join('');
+  return `<div class="nutri"><span class="nutri-label">하루 영양 체크</span>${chips}<span class="nchip soft">채소 색 ${n.colors.size}가지</span></div>`;
+}
+function tagChips(c) {
+  const i = nInfo(c.name, c.category);
+  if (!i.known && !i.tags.length) return '<span class="ntag unknown">영양 정보 없음</span>';
+  return i.tags.filter((t) => NUTRIENTS[t]).map((t) => `<span class="ntag">${NUTRIENTS[t]}</span>`).join('');
+}
+
 // ---------- 대시보드 ----------
 function viewHome() {
   const f = forecast({ cubes: state.cubes, settings: S(), birth: state.baby.birth, today, plans: state.plans });
   const todayPlan = state.plans[today];
 
   const todayHtml = todayPlan
-    ? `<div class="meals">${mealKeys(todayPlan.meals).map((k) => renderMeal(today, k, todayPlan.meals[k])).join('')}</div>`
+    ? `<div class="meals">${mealKeys(todayPlan.meals).map((k) => renderMeal(today, k, todayPlan.meals[k])).join('')}</div>${nutritionChips(todayPlan)}`
     : `<div class="empty">오늘 식단이 아직 없어요.<br><button class="primary" data-action="quick-plan">오늘부터 3일 식단 자동으로 짜기</button></div>`;
 
   // 알림
@@ -272,6 +286,7 @@ function viewCubes() {
             <div class="lot-info">
               <b>${esc(x.name)}</b> ${x.count > 0 ? dBadge(dl) : '<span class="badge">소진</span>'}
               <small>${shortDate(x.madeDate)} 제조 · ~${shortDate(expiryDate(x, S().shelfDays))} · ${x.sizeG}g/개</small>
+              <div class="ntags">${tagChips(x)}</div>
             </div>
             <div class="lot-count">
               <button class="icon" data-action="dec" data-id="${x.id}" aria-label="1개 사용">−</button>
@@ -328,13 +343,27 @@ function viewRationale() {
     <details class="why">
       <summary>왜 이렇게 추천하나요?</summary>
       <h3>⚡ 자동 추천 (규칙 기반)</h3>
-      <p class="small muted">인터넷·API 키 없이 항상 같은 기준으로 동작해요. 기록용 앱이라 <b>예측 가능하고 재고와 정확히 맞는 것</b>을 우선했어요.</p>
+      <p class="small muted">인터넷·API 키 없이 항상 같은 기준으로 동작해요. 끼니의 뼈대(밥·단백질)는 고정하고, 채소는 <b>영양 궁합 점수</b>가 가장 높은 조합을 골라요. 소비기한은 점수의 한 요소일 뿐이에요.</p>
       <table class="why-table">
         <tr><th>매끼 밥 ${s.riceCubesPerMeal}개</th><td>탄수화물은 이유식의 주 에너지원이라 모든 끼니의 기본으로 고정했어요.</td></tr>
         <tr><th>점심 = 소고기</th><td>생후 6개월 무렵부터 몸에 저장된 철분이 줄어들어, 흡수가 잘 되는 소고기(헴철)를 <b>매일</b> 먹이는 것이 일반적인 권장이에요. 점심에 고정하면 하루도 빠지지 않고, 낮에 먹여서 소화나 피부 반응도 살펴보기 쉬워요.</td></tr>
-        <tr><th>저녁 = 닭고기 또는 생선</th><td>소고기와 겹치지 않게 단백질 종류를 다양하게 하고, 흰살생선의 DHA·단백질도 챙기려는 구성이에요. 기본은 <b>전날과 번갈아</b> 주고, 한쪽 기한이 2일 이내로 남으면 그쪽을 먼저 써요.</td></tr>
-        <tr><th>채소 ${s.vegKindsPerMeal}종 × ${s.vegCubesEach}개</th><td>비타민·식이섬유를 채우고 여러 맛에 익숙해지게 하려는 구성이에요. 같은 날 앞 끼니와 다른 채소를 우선 골라요.</td></tr>
-        <tr><th>소비기한 임박 순</th><td>만든 날 포함 ${s.shelfDays}일 원칙을 지키려고, 기한이 가장 빠른 큐브부터 써서(선입선출) 버리는 큐브를 줄여요.</td></tr>
+        <tr><th>저녁 = 닭고기 또는 생선</th><td>단백질 종류를 다양하게 하려고 <b>전날과 번갈아</b> 줘요. 생선(DHA·비타민D)은 <b>주 2회 이상</b>이 되도록, 최근 6일에 2번 미만이면 생선을 먼저 넣어요.</td></tr>
+      </table>
+      <h3>🥦 채소 조합 규칙 (영양 궁합 점수)</h3>
+      <table class="why-table">
+        <tr><th>철분 + 비타민C <span class="pts">+3</span></th><td>비타민C는 철분(특히 채소·곡류의 비헴철) 흡수를 높여요. 소고기 점심엔 브로콜리·양배추·감자·무 같은 비타민C 채소를 우선해요.</td></tr>
+        <tr><th>베타카로틴 + 지방 <span class="pts">+2</span></th><td>당근·단호박·고구마의 베타카로틴은 지용성이라 소고기·연어·노른자의 지방과 함께 흡수가 잘 돼요. 기름기 적은 닭·흰살생선엔 참기름 한 방울을 권해요.</td></tr>
+        <tr><th>비타민D + 칼슘 <span class="pts">+1.5</span></th><td>생선·버섯의 비타민D가 브로콜리·청경채·두부의 칼슘 흡수를 도와요.</td></tr>
+        <tr><th>피할 조합 <span class="pts bad">−3</span></th><td>시금치의 옥살산은 두부·치즈·요거트의 칼슘 흡수를 방해해 같은 끼니에 넣지 않아요.</td></tr>
+        <tr><th>색 다양성 <span class="pts">+1/색</span></th><td>초록·주황·흰색·빨강 채소는 서로 다른 비타민·항산화 성분을 갖고 있어 색이 다른 채소끼리 묶어요.</td></tr>
+        <tr><th>하루 균형 <span class="pts">+0.8/개</span></th><td>앞 끼니에서 못 채운 비타민C·베타카로틴·칼슘·철분·엽산·식이섬유를 다음 끼니에서 보충해요.</td></tr>
+        <tr><th>맛 궁합 <span class="pts">+1~2</span></th><td>소고기+무·애호박·버섯, 닭고기+단호박·브로콜리, 생선+시금치·감자처럼 잘 어울리는 조합을 더해요.</td></tr>
+        <tr><th>소비기한 <span class="pts">+4/+1</span></th><td>2일 이내 남은 큐브는 +4, 4일 이내는 +1. 만든 날 포함 ${s.shelfDays}일 원칙을 지키되 영양 규칙을 덮어쓰진 않아요.</td></tr>
+        <tr><th>반복 피하기 <span class="pts bad">−4.5/−0.7</span></th><td>바로 앞 끼니와 같은 채소 −4.5 (기한 임박 가산 +4보다 크게 해서 같은 날 반복을 막아요), 전날 먹은 채소 −0.7.</td></tr>
+      </table>
+      <p class="small muted">식단 카드의 <b>영양 체크</b>는 하루 동안 단백질·철분·비타민C·베타카로틴·칼슘·DHA·식이섬유를 채웠는지 보여줘요. 큐브 탭에서 재료별 영양 태그도 확인할 수 있어요. 목록에 없는 재료는 궁합 계산에서 빠져요.</p>
+      <h3>기타 규칙</h3>
+      <table class="why-table">
         <tr><th>기한 지난 큐브 제외</th><td>안전을 위해 기한이 지난 큐브는 절대 추천하지 않고 폐기 알림을 띄워요.</td></tr>
         <tr><th>9개월부터 아침 추가</th><td>후기 이유식(9개월~)부터는 하루 3끼가 일반적이라, 9개월이 되는 날(${shortDate(nineMonthDate(state.baby.birth))})부터 자동으로 아침이 들어가요.${s.fruitAtBreakfast ? ' 아침에는 가볍게 과일 큐브를 곁들여요.' : ''}</td></tr>
         <tr><th>끼니 양</th><td>정해진 정답이 없어서 설정에서 끼니당 큐브 수를 조절할 수 있게 했어요. 아기가 먹는 양에 맞춰 바꿔주세요.</td></tr>
@@ -342,7 +371,7 @@ function viewRationale() {
       <h3>✨ AI 추천 (Claude / Gemini)</h3>
       <p class="small muted">위와 <b>같은 규칙</b>을 AI에게 알려주고, 규칙만으로는 하기 어려운 판단을 맡겨요.</p>
       <table class="why-table">
-        <tr><th>쓰는 이유</th><td>재고 전체를 보고 맛 궁합·영양 균형을 고려해 조합하고, 재고가 애매할 때 수량을 유연하게 나눠요. 끼니마다 고른 이유와 전체 요약도 설명해줘요.</td></tr>
+        <tr><th>쓰는 이유</th><td>위 영양 궁합 규칙과 재료별 영양 태그를 그대로 AI에게 주고, 점수표로는 표현하기 어려운 판단(조리 질감, 며칠에 걸친 메뉴 흐름, 재고가 애매할 때의 수량 배분)을 맡겨요. 끼니마다 어떤 영양을 서로 보완하는지 설명해줘요.</td></tr>
         <tr><th>안전장치</th><td>AI는 실제로 있는 큐브 ID 중에서만 고르도록 형식을 강제해요. 결과가 오면 앱이 기한·재고·필수 규칙(밥/소고기/닭·생선)을 <b>다시 검사</b>하고, 틀린 부분은 자동으로 고친 뒤 보정한 내용을 알려줘요.</td></tr>
         <tr><th>Claude / Gemini</th><td>둘 중 가진 키로 선택할 수 있어요. Claude Opus 5.5는 꼼꼼한 판단, Gemini Flash는 빠르고 저렴한 쪽이에요.</td></tr>
         <tr><th>API 키</th><td>서버 없는 앱이라 본인 키로 브라우저에서 바로 호출해요. 키는 이 기기에만 저장되고 클라우드 공유·백업 파일에는 들어가지 않아요.</td></tr>
@@ -366,6 +395,7 @@ function viewPlan() {
           <button class="ghost sm" data-action="del-plan" data-date="${d}">삭제</button>
         </div>
         <div class="meals">${mealKeys(p.meals).map((k) => renderMeal(d, k, p.meals[k])).join('')}</div>
+        ${nutritionChips(p)}
       </div>`;
     })
     .join('');
@@ -407,6 +437,7 @@ function recipeCard(r) {
         ${r.extras?.length ? `<div><h4>추가 재료</h4><ul class="chips soft">${r.extras.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></div>` : ''}
       </div>
       <ol class="steps">${r.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol>
+      ${r.why?.length ? `<p class="comment">🥦 ${r.why.map(esc).join(' · ')}</p>` : ''}
       ${r.tip ? `<p class="comment">💡 ${esc(r.tip)}</p>` : ''}
       <button class="primary sm" data-action="cook" data-id="${r.id}">이 요리 만들기 (재고 차감)</button>
     </div>`;
@@ -561,10 +592,10 @@ function render() {
 function generateRule(start, days) {
   const range = Array.from({ length: days }, (_, i) => addDays(start, i));
   const reserved = reservedFromPlans(state.plans, range);
-  const { skipMeals, eatenVeg } = eatenInfo(state.plans, range);
+  const { skipMeals, eatenItems } = eatenInfo(state.plans, range);
   const out = buildPlan({
-    cubes: state.cubes, settings: S(), birth: state.baby.birth, startDate: start, days, reserved, skipMeals, eatenVeg,
-    lastDinner: lastDinnerProtein(state.plans, start),
+    cubes: state.cubes, settings: S(), birth: state.baby.birth, startDate: start, days, reserved, skipMeals, eatenItems,
+    recentDinners: recentDinnerProteins(state.plans, start),
   });
   for (const d of out.days) mergeDay(d.date, d.meals, 'auto');
 }

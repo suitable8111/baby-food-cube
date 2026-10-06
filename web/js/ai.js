@@ -4,6 +4,20 @@
 import {
   Allocator, CATEGORIES, MEALS, addDays, ageInfo, expiryDate, isUsable, mealsForDate,
 } from './logic.js';
+import { info as nInfo, NUTRIENTS, COLORS } from './nutrition.js';
+
+// 자동 추천 엔진(nutrition.scoreCombo)과 같은 영양 궁합 원칙
+const NUTRITION_RULES = `영양 궁합 원칙 (소비기한보다 우선해서 고려하되, 기한 2일 이내 큐브는 꼭 활용):
+1. 철분(소고기·시금치·두부·노른자) + 비타민C 채소(브로콜리·양배추·감자·무·파프리카 등)를 같은 끼니에 → 철분 흡수↑
+2. 베타카로틴 채소(당근·단호박·고구마·시금치)는 지방이 있는 단백질(소고기·연어·노른자)과 함께 → 지용성이라 흡수↑. 기름기 적은 끼니엔 참기름 한 방울 팁
+3. 비타민D(생선·버섯) + 칼슘(브로콜리·청경채·두부·치즈) → 칼슘 흡수↑
+4. 피할 조합: 시금치(옥살산)와 칼슘 많은 식품(두부·치즈·요거트)은 같은 끼니에 넣지 않기
+5. 한 끼 채소는 서로 다른 색(초록·주황·흰색·빨강)과 다른 분류로 구성
+6. 하루 전체로 단백질·철분·비타민C·베타카로틴·칼슘·DHA·식이섬유를 고르게 채우고, 앞 끼니에서 부족한 것을 다음 끼니에서 보충
+7. 생선은 주 2회 이상(DHA·비타민D)
+8. 맛 궁합: 소고기+무·애호박·버섯·양파, 닭고기+단호박·브로콜리·고구마, 생선+시금치·감자·애호박
+9. 같은 날 같은 채소 반복은 피하기
+inventory의 nutrients·color는 각 재료의 대표 영양 정보입니다.`;
 
 const SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk/+esm';
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -106,10 +120,17 @@ function inventoryFor(state, startDate, endDate, reserved) {
   return state.cubes
     .map((c) => ({ c, avail: c.count - (reserved[c.id] || 0) }))
     .filter(({ c, avail }) => avail > 0 && expiryDate(c, s.shelfDays) >= startDate && c.madeDate <= endDate)
-    .map(({ c, avail }) => ({
-      cubeId: c.id, name: c.name, category: CATEGORIES[c.category].label, sizeG: c.sizeG,
-      available: avail, madeDate: c.madeDate, expiry: expiryDate(c, s.shelfDays),
-    }));
+    .map(({ c, avail }) => {
+      const n = nInfo(c.name, c.category);
+      return {
+        cubeId: c.id, name: c.name, category: CATEGORIES[c.category].label, sizeG: c.sizeG,
+        available: avail, madeDate: c.madeDate, expiry: expiryDate(c, s.shelfDays),
+        nutrients: n.tags.filter((t) => NUTRIENTS[t]).map((t) => NUTRIENTS[t]),
+        color: n.color ? COLORS[n.color] : null,
+        ...(n.oxalate ? { note: '옥살산 많음' } : {}),
+        ...(n.caRich ? { note: '칼슘 많은 식품' } : {}),
+      };
+    });
 }
 
 const SYSTEM_PLAN = `당신은 영유아 이유식 영양사입니다. 부모가 미리 만들어 냉동해 둔 이유식 큐브 재고만으로 식단을 짭니다.
@@ -119,10 +140,12 @@ const SYSTEM_PLAN = `당신은 영유아 이유식 영양사입니다. 부모가
 - 저녁에는 반드시 닭고기 또는 생선 큐브를 넣습니다.
 - 각 큐브는 소비기한(expiry) 이후 날짜나 만든 날(madeDate) 이전 날짜에 쓰면 안 됩니다.
 - 모든 날짜를 합친 큐브 사용량이 available을 넘으면 안 됩니다.
-- 소비기한이 임박한 큐브를 먼저 쓰고, 같은 날 같은 채소가 반복되지 않게 다양하게 구성합니다.
 - 끼니별 기본 수량은 사용자가 준 값을 따르되, 재고 상황에 맞게 조정할 수 있습니다.
-comment에는 이 끼니 조합을 고른 이유(소비기한·재고·영양 균형·맛 궁합 중 해당하는 것)를 한국어 한 문장으로 적습니다.
-summary에는 전체 식단을 이렇게 구성한 이유와, 재고가 부족해 곧 만들어야 할 큐브가 있다면 그 내용을 한국어 2~3문장으로 적습니다.`;
+
+${NUTRITION_RULES}
+
+comment에는 이 끼니에서 재료들이 영양적으로 어떻게 서로 보완하는지(예: "브로콜리의 비타민C가 소고기 철분 흡수를 돕고, 당근의 베타카로틴은 소고기 지방과 함께 흡수가 잘 돼요")를 한국어 1~2문장으로 구체적으로 적습니다. 단순히 "소비기한이 임박해서"만 쓰지 마세요.
+summary에는 며칠간의 식단이 영양적으로 어떻게 균형을 이루는지, 부족한 영양소나 곧 만들어야 할 큐브(예: 비타민C 채소가 부족하니 브로콜리 큐브 추천)를 한국어 2~3문장으로 적습니다.`;
 
 /** AI 식단을 받아 앱 식단 형식으로 변환. 규칙 위반·재고 초과는 자동 보정하고 경고로 알려준다. */
 export async function aiPlan(state, ai, { startDate, days, reserved }) {
@@ -237,7 +260,10 @@ const SYSTEM_RECIPE = `당신은 9개월 이상 아기를 위한 이유식(후�
 - 큐브는 inventory에 있는 것만, available 이하로 사용합니다. 소비기한이 임박한 큐브를 우선 활용합니다.
 - 간(소금·간장·설탕)은 넣지 않습니다. 꿀은 사용하지 않습니다.
 - 큐브 외에 필요한 재료(두부, 달걀노른자, 쌀가루, 분유 등)는 extras에 적습니다. 알레르기 주의 재료는 표시합니다.
-- 핑거푸드·진밥·완자 등 질감이 다양하게 3~5개 추천합니다. 모든 텍스트는 한국어로 씁니다.`;
+- 핑거푸드·진밥·완자 등 질감이 다양하게 3~5개 추천합니다. 모든 텍스트는 한국어로 씁니다.
+- 각 레시피는 아래 영양 궁합 원칙에 맞게 재료를 조합하고, tip에는 이 조합이 영양적으로 어떻게 서로 보완하는지 적습니다.
+
+${NUTRITION_RULES}`;
 
 export async function aiRecipes(state, ai, { date, reserved }) {
   const inventory = inventoryFor(state, date, date, reserved).filter((x) => {

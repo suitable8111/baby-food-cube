@@ -1,5 +1,6 @@
 // 순수 로직 모듈: 날짜/월령 계산, 소비기한, 식단 배정, 소진 예측, 레시피 매칭.
 // DOM·localStorage에 의존하지 않으므로 node --test로 검증할 수 있다.
+import { info, scoreCombo, combinations, nutritionCheck } from './nutrition.js';
 
 export const CATEGORIES = {
   rice: { label: '밥', emoji: '🍚' },
@@ -163,7 +164,8 @@ const L = (cat) => CATEGORIES[cat].label;
 const other = (cat) => (cat === 'chicken' ? 'fish' : 'chicken');
 
 /** 저녁 단백질 선택. { cat, why } — why는 화면에 보여줄 선택 이유 */
-function pickDinnerProtein(alloc, date, need, lastDinner) {
+function pickDinnerProtein(alloc, date, need, recentDinners = []) {
+  const lastDinner = recentDinners.at(-1);
   const ok = ['chicken', 'fish'].filter((cat) => alloc.usableQty(date, (c) => c.category === cat) >= need);
   if (ok.length === 0) {
     // 둘 다 부족하면 남은 쪽이라도 사용
@@ -171,6 +173,13 @@ function pickDinnerProtein(alloc, date, need, lastDinner) {
     return any[0] ? { cat: any[0], why: `닭고기·생선 모두 부족해 남은 ${L(any[0])} 사용` } : { cat: null, why: '' };
   }
   if (ok.length === 1) return { cat: ok[0], why: `${L(other(ok[0]))} 재고가 없어 ${L(ok[0])}` };
+  // 생선은 일주일에 2번 이상(DHA·비타민D): 최근 6일 저녁 중 생선이 2번 미만이면 생선 우선.
+  // 단, 닭고기가 오늘·내일 버려질 상황이면 닭고기를 먼저 쓴다.
+  const fishWeek = recentDinners.slice(-6).filter((c) => c === 'fish').length;
+  const chickenCritical = diffDays(date, alloc.earliestExpiry(date, (c) => c.category === 'chicken')) <= 1;
+  if (recentDinners.length >= 4 && fishWeek < 2 && !chickenCritical) {
+    return { cat: 'fish', why: `최근 6일 생선 ${fishWeek}번뿐 → 주 2회 생선(DHA·비타민D) 채우기` };
+  }
   // 둘 다 가능: 2일 이내 소비기한 임박한 쪽 우선, 아니면 전날과 번갈아
   const urgent = ok.filter((cat) => diffDays(date, alloc.earliestExpiry(date, (c) => c.category === cat)) <= 2);
   if (urgent.length === 1) return { cat: urgent[0], why: `${L(urgent[0])} 소비기한이 임박해 먼저` };
@@ -187,25 +196,49 @@ function pickDinnerProtein(alloc, date, need, lastDinner) {
   return { cat: 'chicken', why: '닭고기부터 시작해 생선과 번갈아' };
 }
 
-function pickVeg(alloc, date, s, avoidNames, usedToday) {
+/**
+ * 영양 궁합 점수가 가장 높은 k종 조합을 고른다 (nutrition.scoreCombo).
+ * 소비기한 임박은 점수의 한 요소로만 반영한다.
+ */
+function chooseCombo(alloc, date, category, base, k, minQty, ctx = {}) {
+  const shelf = alloc.settings.shelfDays;
   const byName = new Map();
-  for (const c of alloc.lots(date, (c) => c.category === 'veg')) {
-    const e = byName.get(c.name) || { name: c.name, qty: 0, exp: expiryDate(c, s.shelfDays) };
+  for (const c of alloc.lots(date, (c) => c.category === category)) {
+    const e = byName.get(c.name) || { name: c.name, qty: 0, exp: expiryDate(c, shelf) };
     e.qty += alloc.avail.get(c.id);
     byName.set(c.name, e);
   }
-  let cands = [...byName.values()].filter((v) => v.qty >= s.vegCubesEach);
-  const fresh = cands.filter((v) => !avoidNames.has(v.name));
-  if (fresh.length >= s.vegKindsPerMeal) cands = fresh;
-  cands.sort((a, b) => a.exp.localeCompare(b.exp) || (usedToday.get(a.name) || 0) - (usedToday.get(b.name) || 0) || a.name.localeCompare(b.name));
-  const items = [];
-  for (const v of cands.slice(0, s.vegKindsPerMeal)) items.push(...alloc.take(date, 'veg', s.vegCubesEach, { name: v.name }));
-  const lacking = s.vegKindsPerMeal - Math.min(cands.length, s.vegKindsPerMeal);
-  if (lacking > 0) items.push({ missing: true, category: 'veg', name: `채소 ${lacking}종`, qty: lacking * s.vegCubesEach });
-  return items;
+  const cands = [...byName.values()].filter((v) => v.qty >= minQty);
+  const urgency = new Map(cands.map((v) => [v.name, diffDays(date, v.exp)]));
+  const sctx = { ...ctx, urgency };
+  let pool = cands;
+  if (pool.length > 10) {
+    const solo = new Map(pool.map((v) => [v.name, scoreCombo(base, [v.name], sctx).score]));
+    pool = [...pool].sort((a, b) => solo.get(b.name) - solo.get(a.name)).slice(0, 10);
+  }
+  let best = null;
+  for (const combo of combinations(pool, Math.min(k, pool.length))) {
+    const names = combo.map((v) => v.name);
+    const r = scoreCombo(base, names, sctx);
+    const tie = names.reduce((s, n) => s + urgency.get(n), 0);
+    if (!best || r.score > best.r.score + 1e-9 || (Math.abs(r.score - best.r.score) < 1e-9 && tie < best.tie)) best = { names, r, tie };
+  }
+  return best || { names: [], r: { reasons: [], warnings: [] } };
 }
 
-/** 한 끼 구성. 규칙: 매끼 밥 / 점심 소고기 / 저녁 닭고기 또는 생선 / 채소 n종 / 아침 과일(선택) */
+function pickVeg(alloc, date, s, base, ctx) {
+  const best = chooseCombo(alloc, date, 'veg', base, s.vegKindsPerMeal, s.vegCubesEach, ctx);
+  const items = [];
+  for (const n of best.names) items.push(...alloc.take(date, 'veg', s.vegCubesEach, { name: n }));
+  const lacking = s.vegKindsPerMeal - best.names.length;
+  if (lacking > 0) items.push({ missing: true, category: 'veg', name: `채소 ${lacking}종`, qty: lacking * s.vegCubesEach });
+  return { items, reasons: best.r.reasons.map((x) => x.text), warnings: best.r.warnings.map((x) => x.text).filter(Boolean) };
+}
+
+/**
+ * 한 끼 구성. 규칙: 매끼 밥 / 점심 소고기 / 저녁 닭고기 또는 생선 / 채소 n종 / 아침 단백질·과일(있으면)
+ * 채소는 단백질·하루 섭취와의 영양 궁합 점수로 고른다.
+ */
 export function composeMeal(alloc, date, meal, ctx = {}) {
   const s = alloc.settings;
   const items = [...alloc.take(date, 'rice', s.riceCubesPerMeal)];
@@ -215,16 +248,42 @@ export function composeMeal(alloc, date, meal, ctx = {}) {
     protein = 'beef';
     items.push(...alloc.take(date, 'beef', s.proteinCubesPerMeal));
   } else if (meal === 'dinner') {
-    const pick = pickDinnerProtein(alloc, date, s.proteinCubesPerMeal, ctx.lastDinner);
+    const pick = pickDinnerProtein(alloc, date, s.proteinCubesPerMeal, ctx.recentDinners || []);
     protein = pick.cat;
     if (pick.why) reasons.push(pick.why);
     if (protein) items.push(...alloc.take(date, protein, s.proteinCubesPerMeal, { missingLabel: '닭고기/생선' }));
     else items.push({ missing: true, category: 'chicken', name: '닭고기/생선', qty: s.proteinCubesPerMeal });
+  } else if (meal === 'breakfast') {
+    // 고기가 없는 아침은 두부·달걀노른자 같은 단백질 큐브가 있으면 1개 더한다
+    const lot = alloc.lots(date, (c) => c.category === 'etc' && info(c.name, 'etc').tags.includes('protein'))[0];
+    if (lot) {
+      items.push(...alloc.take(date, 'etc', 1, { name: lot.name }));
+      reasons.push(`고기 없는 아침이라 ${lot.name}로 단백질 보충`);
+    }
   }
-  items.push(...pickVeg(alloc, date, s, ctx.avoidVeg || new Set(), ctx.usedToday || new Map()));
-  if (meal === 'breakfast' && s.fruitAtBreakfast) items.push(...alloc.take(date, 'fruit', 1, { optional: true }));
 
-  // 이 끼니 구성의 이유 (소비기한 임박·부족)
+  const base = items.filter((it) => !it.missing).map((it) => ({ name: it.name, category: it.category }));
+  const veg = pickVeg(alloc, date, s, base, {
+    protein,
+    todayTags: ctx.todayTags,
+    todayColors: ctx.todayColors,
+    prevVeg: ctx.avoidVeg,
+    yesterdayVeg: ctx.yesterdayVeg,
+  });
+  items.push(...veg.items);
+  reasons.push(...veg.reasons.slice(0, 2));
+
+  if (meal === 'breakfast' && s.fruitAtBreakfast) {
+    const fb = items.filter((it) => !it.missing).map((it) => ({ name: it.name, category: it.category }));
+    const fruit = chooseCombo(alloc, date, 'fruit', fb, 1, 1, { todayTags: ctx.todayTags });
+    if (fruit.names[0]) {
+      items.push(...alloc.take(date, 'fruit', 1, { name: fruit.names[0] }));
+      const fr = fruit.r.reasons.find((r) => /비타민C|흡수/.test(r.text));
+      if (fr) reasons.push(fr.text);
+    }
+  }
+
+  // 소비기한 임박·부족·피할 조합
   const urgent = new Set();
   for (const it of items) {
     if (it.missing) {
@@ -238,60 +297,77 @@ export function composeMeal(alloc, date, meal, ctx = {}) {
       reasons.push(`${it.name} 기한 ${n === 0 ? '오늘까지' : `D-${n}`} → 먼저 사용`);
     }
   }
-  const vegs = items.filter((it) => it.category === 'veg' && !it.missing).map((it) => it.name);
-  if (ctx.avoidVeg?.size && vegs.length && vegs.every((n) => !ctx.avoidVeg.has(n))) reasons.push('앞 끼니와 다른 채소로 구성');
+  for (const w of veg.warnings) reasons.push(`⚠️ ${w}`);
   return { items, protein, reasons };
 }
 
 /**
  * 규칙 기반 식단 생성.
+ * @param eatenItems  날짜별 이미 먹은 끼니의 재료 (하루 영양 균형·채소 반복 계산용)
+ * @param recentDinners 시작일 이전 저녁 단백질 기록 ['chicken','fish',...] (오래된 → 최근)
  * @returns {{ days: Array<{date, meals}>, alloc: Allocator, stockByDay: Object }}
  */
-export function buildPlan({ cubes, settings, birth, startDate, days, reserved = {}, skipMeals = {}, eatenVeg = {}, lastDinner = null }) {
+export function buildPlan({ cubes, settings, birth, startDate, days, reserved = {}, skipMeals = {}, eatenItems = {}, recentDinners = [], lastDinner = null }) {
   const alloc = new Allocator(cubes, settings, reserved);
   const out = [];
   const stockByDay = {};
+  const dinners = [...recentDinners];
+  if (!dinners.length && lastDinner) dinners.push(lastDinner);
+  let yesterdayVeg = new Set();
   for (let i = 0; i < days; i++) {
     const date = addDays(startDate, i);
     stockByDay[date] = Object.fromEntries(
       Object.keys(CATEGORIES).map((cat) => [cat, alloc.usableQty(date, (c) => c.category === cat)]),
     );
     const meals = {};
-    // 이미 먹은 끼니의 채소도 같은 날 반복 방지에 반영
-    let prevVeg = new Set(eatenVeg[date] || []);
-    const usedToday = new Map([...prevVeg].map((n) => [n, 1]));
+    // 이미 먹은 끼니도 하루 영양 균형·채소 반복 방지에 반영
+    const eaten = eatenItems[date] || [];
+    const vegOf = (items) => items.filter((it) => it.category === 'veg' && !it.missing).map((it) => it.name);
+    let prevVeg = new Set(vegOf(eaten));
+    const day = nutritionCheck(eaten);
+    const todayVeg = new Set(prevVeg);
     for (const meal of mealsForDate(birth, date)) {
       if ((skipMeals[date] || []).includes(meal)) continue;
-      const { items, protein, reasons } = composeMeal(alloc, date, meal, { lastDinner, avoidVeg: prevVeg, usedToday });
-      if (meal === 'dinner' && protein) lastDinner = protein;
-      prevVeg = new Set(items.filter((it) => it.category === 'veg' && !it.missing).map((it) => it.name));
-      for (const n of prevVeg) usedToday.set(n, (usedToday.get(n) || 0) + 1);
+      const { items, protein, reasons } = composeMeal(alloc, date, meal, {
+        recentDinners: dinners, avoidVeg: prevVeg, yesterdayVeg, todayTags: day.tags, todayColors: day.colors,
+      });
+      if (meal === 'dinner' && protein) dinners.push(protein);
+      prevVeg = new Set(vegOf(items));
+      prevVeg.forEach((n) => todayVeg.add(n));
+      const n = nutritionCheck(items);
+      n.tags.forEach((t) => day.tags.add(t));
+      n.colors.forEach((c) => day.colors.add(c));
       meals[meal] = { items, done: false, comment: reasons.join(' · ') };
     }
+    yesterdayVeg = todayVeg;
     out.push({ date, meals });
   }
   return { days: out, alloc, stockByDay };
 }
 
-/** 날짜별로 이미 먹은 끼니 목록과 그 끼니의 채소 이름 */
+/** 날짜별로 이미 먹은 끼니 목록과 그 끼니의 재료 */
 export function eatenInfo(plans, dates) {
   const skipMeals = {};
-  const eatenVeg = {};
+  const eatenItems = {};
   for (const d of dates) {
     const done = Object.entries(plans?.[d]?.meals || {}).filter(([, m]) => m.done);
     skipMeals[d] = done.map(([k]) => k);
-    eatenVeg[d] = done.flatMap(([, m]) => m.items.filter((it) => it.category === 'veg' && !it.missing).map((it) => it.name));
+    eatenItems[d] = done.flatMap(([, m]) => m.items.filter((it) => !it.missing));
   }
-  return { skipMeals, eatenVeg };
+  return { skipMeals, eatenItems };
+}
+
+/** 시작일 이전 최근 저녁 단백질 기록 (오래된 → 최근) */
+export function recentDinnerProteins(plans, beforeDate, n = 6) {
+  return Object.keys(plans || {})
+    .filter((d) => d < beforeDate && d >= addDays(beforeDate, -n))
+    .sort()
+    .map((d) => (plans[d].meals?.dinner?.items || []).find((x) => !x.missing && (x.category === 'chicken' || x.category === 'fish'))?.category)
+    .filter(Boolean);
 }
 
 export function lastDinnerProtein(plans, beforeDate) {
-  const dates = Object.keys(plans || {}).filter((d) => d < beforeDate).sort().reverse();
-  for (const d of dates) {
-    const it = (plans[d].meals?.dinner?.items || []).find((x) => !x.missing && (x.category === 'chicken' || x.category === 'fish'));
-    if (it) return it.category;
-  }
-  return null;
+  return recentDinnerProteins(plans, beforeDate, 30).at(-1) || null;
 }
 
 // ---------- 소진 예측 ----------
@@ -303,8 +379,10 @@ export function forecast({ cubes, settings, birth, today, plans = {} }) {
   const s = { ...DEFAULT_SETTINGS, ...settings };
   const horizon = s.forecastHorizon;
   const todayPlan = plans[today];
-  const { skipMeals, eatenVeg } = eatenInfo(plans, [today]);
-  const sim = buildPlan({ cubes, settings: s, birth, startDate: today, days: horizon, skipMeals, eatenVeg, lastDinner: lastDinnerProtein(plans, today) });
+  const { skipMeals, eatenItems } = eatenInfo(plans, [today]);
+  const sim = buildPlan({
+    cubes, settings: s, birth, startDate: today, days: horizon, skipMeals, eatenItems, recentDinners: recentDinnerProteins(plans, today),
+  });
 
   const result = {};
   for (const cat of ['rice', 'beef', 'chicken', 'fish']) {
@@ -413,14 +491,17 @@ export function matchRecipes({ cubes, settings, date, reserved = {} }) {
     const used = [];
     const names = {};
     let ok = true;
+    // 추가 재료(두부·노른자 등)도 궁합 계산에 넣는다
+    const extrasBase = r.extras.map((e) => ({ name: e, category: 'etc' }));
+    const protein = r.needs.map(([c]) => c).find((c) => ['beef', 'chicken', 'fish'].includes(c)) || null;
+    let nutri = { score: 0, reasons: [] };
     for (const [cat, qty, kinds] of r.needs) {
       if (kinds) {
-        const byName = new Map();
-        for (const c of alloc.lots(date, (c) => c.category === cat)) {
-          if (!byName.has(c.name)) byName.set(c.name, expiryDate(c, s.shelfDays));
-        }
-        const chosen = [...byName.entries()].sort((a, b) => a[1].localeCompare(b[1])).slice(0, kinds).map(([n]) => n);
+        const base = [...used.map((it) => ({ name: it.name, category: it.category })), ...extrasBase];
+        const best = chooseCombo(alloc, date, cat, base, kinds, qty, { protein });
+        const chosen = best.names;
         if (chosen.length === 0) { ok = false; break; }
+        nutri = { score: nutri.score + best.r.score, reasons: [...nutri.reasons, ...best.r.reasons.map((x) => x.text)] };
         for (const n of chosen) used.push(...alloc.take(date, cat, qty, { name: n }));
         names[cat] = chosen.join('·');
       } else {
@@ -433,9 +514,11 @@ export function matchRecipes({ cubes, settings, date, reserved = {} }) {
     if (!ok || used.some((it) => it.missing)) continue;
     const urgency = Math.min(...used.map((it) => daysLeft(cubes.find((c) => c.id === it.cubeId), date, s.shelfDays)));
     const fill = (t) => t.replace(/\{(\w+)\}/g, (_, k) => names[k] || CATEGORIES[k]?.label || k);
-    out.push({ id: r.id, title: r.title, items: used, extras: r.extras, steps: r.steps.map(fill), urgency });
+    // 영양 궁합 점수 순, 소비기한 임박 큐브를 쓰는 레시피는 가산
+    const rank = nutri.score + (urgency <= 2 ? 3 : 0);
+    out.push({ id: r.id, title: r.title, items: used, extras: r.extras, steps: r.steps.map(fill), urgency, rank, why: nutri.reasons.slice(0, 2) });
   }
-  return out.sort((a, b) => a.urgency - b.urgency);
+  return out.sort((a, b) => b.rank - a.rank || a.urgency - b.urgency);
 }
 
 // ---------- 소비 처리 ----------
