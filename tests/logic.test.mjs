@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   ageInfo, mealsForDate, nineMonthDate, expiryDate, buildPlan, forecast,
   matchRecipes, applyConsumption, restoreConsumption, guessCategory, addMonths, daysLeft, isUsable,
-  reservedFromPlans, eatenInfo,
+  reservedFromPlans, eatenInfo, evaluateMeal,
 } from '../web/js/logic.js';
 import { scoreCombo } from '../web/js/nutrition.js';
 
@@ -223,6 +223,28 @@ test('직접 수정한 끼니는 다시 짤 때 유지되고, 그 큐브는 재�
   const { days } = buildPlan({ cubes, settings: {}, birth: BIRTH, startDate: '2026-10-06', days: 1, skipMeals, eatenItems });
   assert.ok(!days[0].meals.lunch);
   assert.ok(!days[0].meals.dinner.items.some((i) => i.name === '애호박'));
+});
+
+test('직접 수정한 끼니 평가', () => {
+  const it = (name, category) => ({ cubeId: name, name, category, qty: 1 });
+  const stock = [cube('v9', '브로콜리', 'veg', '2026-10-10', 5), cube('v8', '무', 'veg', '2026-10-10', 5)];
+  const ev = (meal, items, sameDayVeg) => evaluateMeal({ meal, items, date: '2026-10-10', cubes: stock, sameDayVeg });
+
+  // 좋은 조합: 궁합 + 철분·비타민C + 베타카로틴·지방 + 색 다양
+  const great = ev('lunch', [it('밥', 'rice'), it('소고기', 'beef'), it('브로콜리', 'veg'), it('당근', 'veg')]);
+  assert.equal(great.grade, 'great');
+  assert.ok(great.points.some((p) => p.type === 'good' && /소고기\+브로콜리/.test(p.text)));
+
+  // 나쁜 궁합·규칙 위반·같은 날 중복은 경고
+  const bad = ev('lunch', [it('밥', 'rice'), it('소고기', 'beef'), it('고구마', 'veg')]);
+  assert.equal(bad.grade, 'warn');
+  assert.ok(bad.points.some((p) => /고구마.*맞지 않아요/.test(p.text)));
+  assert.ok(ev('lunch', [it('밥', 'rice'), it('닭고기', 'chicken'), it('브로콜리', 'veg')]).points.some((p) => /점심 소고기/.test(p.text)));
+  assert.equal(ev('dinner', [it('밥', 'rice'), it('닭고기', 'chicken'), it('애호박', 'veg')], new Set(['애호박'])).grade, 'warn');
+
+  // 아쉬운 점에는 재고 기반 제안
+  const meh = ev('lunch', [it('밥', 'rice'), it('소고기', 'beef'), it('오이', 'veg')]);
+  assert.ok(meh.points.some((p) => p.type === 'tip' && /브로콜리/.test(p.text)));
 });
 
 test('레시피 매칭과 소비/복구', () => {

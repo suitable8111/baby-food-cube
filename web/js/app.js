@@ -1,6 +1,6 @@
 import {
   CATEGORIES, MEALS, addDays, ageInfo, nineMonthDate, diffDays, todayStr, shortDate, expiryDate, daysLeft, isUsable,
-  guessCategory, reservedFromPlans, buildPlan, eatenInfo, recentDinnerProteins, forecast, matchRecipes,
+  guessCategory, reservedFromPlans, buildPlan, eatenInfo, recentDinnerProteins, forecast, matchRecipes, evaluateMeal,
   applyConsumption, restoreConsumption,
 } from './logic.js';
 import { loadState, saveState, loadAi, saveAi, defaultState, normalizeState, uid } from './store.js';
@@ -257,9 +257,27 @@ function renderMeal(date, key, meal) {
       </div>
       <ul class="items">${items}${addRow}</ul>
       ${editing ? `<p class="small muted edit-help">큐브를 바꾸거나 개수를 조절하세요. 수정한 끼니는 ⚡ 자동 추천을 다시 눌러도 그대로 유지되고, ✓ 먹었어요를 누르면 이 내용대로 재고에서 빠져요.${meal.edited ? ` <button class="link" data-action="edit-reset" ${at}>자동 추천으로 되돌리기</button>` : ''}</p>` : ''}
-      ${warns.map((w) => `<p class="pair-warn">⚠️ ${esc(w)}</p>`).join('')}
-      ${badPairsOf(meal).map((p) => `<p class="pair-warn">⚠️ 궁합 주의: <b>${esc(p.a)}+${esc(p.b)}</b>${p.why ? ` — ${esc(p.why)}` : ''}${meal.done ? '' : '<br>큐브를 바꾸거나 ⚡ 자동 추천을 다시 받아주세요.'}</p>`).join('')}
-      ${meal.comment ? `<p class="comment">💡 ${meal.edited ? '<small>(추천 당시)</small> ' : ''}${esc(meal.comment)}</p>` : ''}
+      ${(meal.edited ? warns.filter((w) => !/같은 날/.test(w)) : warns).map((w) => `<p class="pair-warn">⚠️ ${esc(w)}</p>`).join('')}
+      ${meal.edited ? evalBox(date, key, meal) : `
+        ${badPairsOf(meal).map((p) => `<p class="pair-warn">⚠️ 궁합 주의: <b>${esc(p.a)}+${esc(p.b)}</b>${p.why ? ` — ${esc(p.why)}` : ''}${meal.done ? '' : '<br>큐브를 바꾸거나 ⚡ 자동 추천을 다시 받아주세요.'}</p>`).join('')}
+        ${meal.comment ? `<p class="comment">💡 ${esc(meal.comment)}</p>` : ''}`}
+    </div>`;
+}
+
+/** 직접 수정한 끼니의 조합 평가 (자동 추천과 같은 기준) */
+function evalBox(date, key, meal) {
+  const sameDayVeg = new Set(
+    Object.entries(state.plans[date]?.meals || {})
+      .filter(([k]) => k !== key)
+      .flatMap(([, m]) => m.items.filter((i) => i.category === 'veg' && !i.missing).map((i) => i.name)),
+  );
+  const ev = evaluateMeal({ meal: key, items: meal.items, date, cubes: state.cubes, settings: S(), sameDayVeg });
+  const icon = { great: '👍', ok: '🙂', meh: '🤔', warn: '⚠️' }[ev.grade];
+  const mark = { good: '⭕', bad: '❌', tip: '💡' };
+  return `
+    <div class="eval ${ev.grade}">
+      <div class="eval-head">📝 조합 평가 <b>${icon} ${esc(ev.label)}</b></div>
+      <ul>${ev.points.map((p) => `<li class="${p.type}">${mark[p.type]} ${esc(p.text)}</li>`).join('')}</ul>
     </div>`;
 }
 

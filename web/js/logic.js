@@ -1,6 +1,6 @@
 // 순수 로직 모듈: 날짜/월령 계산, 소비기한, 식단 배정, 소진 예측, 레시피 매칭.
 // DOM·localStorage에 의존하지 않으므로 node --test로 검증할 수 있다.
-import { info, scoreCombo, combinations, nutritionCheck, DEFAULT_PAIRS, j } from './nutrition.js';
+import { info, scoreCombo, combinations, nutritionCheck, DEFAULT_PAIRS, j, findPairs, tokenMatch } from './nutrition.js';
 
 export const CATEGORIES = {
   rice: { label: '밥', emoji: '🍚' },
@@ -600,4 +600,94 @@ export function applyConsumption(cubes, items) {
 export function restoreConsumption(cubes, applied) {
   const back = Object.fromEntries((applied || []).map((a) => [a.cubeId, a.qty]));
   return cubes.map((c) => (back[c.id] ? { ...c, count: c.count + back[c.id] } : c));
+}
+
+// ---------- 직접 수정한 끼니 평가 ----------
+/**
+ * 사용자가 고친 끼니가 괜찮은 조합인지 평가한다. 자동 추천과 같은 기준:
+ * 기본 규칙(밥·점심 소고기·저녁 닭/생선·채소) → 음식 궁합 → 영양 보완 → 같은 날 중복.
+ * 부족한 점에는 지금 재고로 할 수 있는 제안을 붙인다.
+ * @returns {{ grade: 'great'|'ok'|'meh'|'warn', label: string, points: Array<{type:'good'|'bad'|'tip', text:string}> }}
+ */
+export function evaluateMeal({ meal, items, date, cubes = [], settings = {}, sameDayVeg = new Set() }) {
+  const s = { ...DEFAULT_SETTINGS, ...settings };
+  const pairs = s.pairs || DEFAULT_PAIRS;
+  const real = items.filter((i) => !i.missing);
+  const cats = new Set(real.map((i) => i.category));
+  const vegs = [...new Set(real.filter((i) => i.category === 'veg').map((i) => i.name))];
+  const protein = real.find((i) => ['beef', 'chicken', 'fish'].includes(i.category));
+  const bad = [];
+  const good = [];
+  const tips = [];
+
+  // 1) 기본 규칙
+  if (!cats.has('rice')) bad.push('밥이 없어요 — 매끼 밥을 넣는 게 원칙이에요');
+  if (meal === 'lunch' && !cats.has('beef')) bad.push('점심 소고기가 빠졌어요 — 철분 보충을 위해 매일 소고기가 필요해요');
+  if (meal === 'dinner' && !cats.has('chicken') && !cats.has('fish')) bad.push('저녁에 닭고기나 생선이 없어요');
+  if (!vegs.length) bad.push('채소가 없어요 — 비타민·식이섬유를 위해 채소를 넣어주세요');
+
+  // 2) 음식 궁합
+  const pr = findPairs(real, pairs);
+  for (const p of pr.bad) bad.push(`${p.a}+${j(p.b, '은', '는')} 궁합이 맞지 않아요${p.why ? ` (${p.why})` : ''}`);
+  const goodSeen = new Set();
+  for (const p of pr.good) {
+    const k = [p.a, p.b].sort().join('+');
+    if (goodSeen.has(k)) continue;
+    goodSeen.add(k);
+    good.push(`${p.a}+${j(p.b, '은', '는')} 궁합이 좋아요`);
+  }
+
+  // 3) 같은 날 채소 중복
+  const dup = vegs.filter((n) => sameDayVeg.has(n));
+  if (dup.length) bad.push(`${dup.join('·')}: 같은 날 다른 끼니와 겹쳐요`);
+
+  // 4) 영양 보완 (궁합은 위에서 봤으니 빈 궁합표로 영양 점수만)
+  if (vegs.length) {
+    const base = real.filter((i) => i.category !== 'veg').map((i) => ({ name: i.name, category: i.category }));
+    const r = scoreCombo(base, vegs, { pairs: { good: [], bad: [] }, category: 'veg' });
+    good.push(...r.reasons.filter((x) => x.tier === 2 && !/한 방울/.test(x.text)).slice(0, 3).map((x) => x.text));
+  }
+
+  // 5) 아쉬운 점 + 지금 재고로 할 수 있는 제안
+  const infos = real.map((i) => info(i.name, i.category));
+  const has = (t) => infos.some((x) => x.tags.includes(t));
+  const stock = cubes.filter((c) => c.category === 'veg' && c.count > 0 && isUsable(c, date, s.shelfDays)
+    && !vegs.includes(c.name) && !sameDayVeg.has(c.name));
+  const stockNames = [...new Set(stock.map((c) => c.name))];
+  const suggest = (pred) => stockNames.filter(pred).slice(0, 2).join('·');
+  if (has('iron') && !infos.some((x) => x.category === 'veg' && x.tags.includes('vitC'))) {
+    const sug = suggest((n) => info(n, 'veg').tags.includes('vitC') && !findPairs([...real, { name: n, category: 'veg' }], pairs).bad.length);
+    tips.push(`비타민C 채소가 있으면 철분 흡수가 좋아져요${sug ? ` — 재고의 ${sug} 추천` : ''}`);
+  }
+  const car = infos.find((x) => x.category === 'veg' && x.tags.includes('carotene'));
+  if (car && !has('fat')) tips.push(`${car.name}의 베타카로틴은 지용성이라 참기름·올리브유 한 방울을 더해주세요`);
+  const colors = new Set(infos.filter((x) => x.category === 'veg' && x.color).map((x) => x.color));
+  if (vegs.length >= 2 && colors.size < 2) tips.push('채소 색이 모두 같아요 — 다른 색 채소를 섞으면 영양소가 더 다양해져요');
+  if (protein && vegs.length && !pr.good.some((p) => p.a === protein.name || p.b === protein.name)) {
+    const sug = suggest((n) => pairs.good.some(([a, b]) => (tokenMatch(a, protein) && tokenMatch(b, { name: n, category: 'veg' }))
+      || (tokenMatch(b, protein) && tokenMatch(a, { name: n, category: 'veg' }))));
+    tips.push(`${j(protein.name, '과', '와')} 궁합 좋은 채소가 없어요${sug ? ` — 재고의 ${sug}${j(sug, '을', '를').slice(sug.length)} 넣어보세요` : ''}`);
+  }
+  if (vegs.length && vegs.length < s.vegKindsPerMeal) tips.push(`채소가 ${vegs.length}종이에요 (기준 ${s.vegKindsPerMeal}종)`);
+
+  let grade;
+  let label;
+  if (bad.length) {
+    grade = 'warn';
+    label = '다시 살펴봐 주세요';
+  } else if (good.length >= 3 && tips.length === 0) {
+    grade = 'great';
+    label = '아주 좋은 조합이에요';
+  } else if (good.length >= 1) {
+    grade = 'ok';
+    label = '괜찮은 조합이에요';
+  } else {
+    grade = 'meh';
+    label = '조금 아쉬워요';
+  }
+  return {
+    grade,
+    label,
+    points: [...bad.map((text) => ({ type: 'bad', text })), ...good.map((text) => ({ type: 'good', text })), ...tips.map((text) => ({ type: 'tip', text }))],
+  };
 }
