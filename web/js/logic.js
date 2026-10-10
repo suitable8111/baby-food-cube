@@ -105,13 +105,16 @@ export function guessCategory(name) {
 }
 
 // ---------- 재고 배정 ----------
-/** 미완료 식단이 이미 잡아둔 큐브 수량 (excludeDates 날짜는 제외) */
+/**
+ * 미완료 식단이 이미 잡아둔 큐브 수량.
+ * excludeDates(다시 짤 날짜)의 끼니는 빼되, 사용자가 직접 수정한 끼니는 다시 짜지 않으므로 계속 잡아둔다.
+ */
 export function reservedFromPlans(plans, excludeDates = []) {
   const reserved = {};
   for (const [date, day] of Object.entries(plans || {})) {
-    if (excludeDates.includes(date)) continue;
+    const regen = excludeDates.includes(date);
     for (const meal of Object.values(day.meals || {})) {
-      if (meal.done) continue;
+      if (meal.done || (regen && !meal.edited)) continue;
       for (const it of meal.items || []) {
         if (it.cubeId) reserved[it.cubeId] = (reserved[it.cubeId] || 0) + it.qty;
       }
@@ -398,12 +401,15 @@ export function buildPlan({ cubes, settings, birth, startDate, days, reserved = 
   return { days: out, alloc, stockByDay };
 }
 
-/** 날짜별로 이미 먹은 끼니 목록과 그 끼니의 재료 */
-export function eatenInfo(plans, dates) {
+/**
+ * 날짜별로 다시 짜지 않을 끼니(먹은 끼니, includeEdited면 직접 수정한 끼니도)와 그 재료.
+ * 재료는 같은 날 채소 중복 금지·하루 영양 계산에 쓰인다.
+ */
+export function eatenInfo(plans, dates, { includeEdited = false } = {}) {
   const skipMeals = {};
   const eatenItems = {};
   for (const d of dates) {
-    const done = Object.entries(plans?.[d]?.meals || {}).filter(([, m]) => m.done);
+    const done = Object.entries(plans?.[d]?.meals || {}).filter(([, m]) => m.done || (includeEdited && m.edited));
     skipMeals[d] = done.map(([k]) => k);
     eatenItems[d] = done.flatMap(([, m]) => m.items.filter((it) => !it.missing));
   }

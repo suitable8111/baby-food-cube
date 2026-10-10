@@ -24,6 +24,7 @@ const ui = {
   aiRecipes: null,
   busy: false,
   catTouched: false,
+  editing: null, // 수정 중인 끼니 'YYYY-MM-DD|lunch'
   joinCode: new URLSearchParams(location.search).get('join') || '',
   pendingRender: false,
 };
@@ -163,37 +164,102 @@ function renderHeader() {
 }
 
 // ---------- 공통: 끼니 카드 ----------
-function swapOptions(date, item) {
-  const lots = state.cubes.filter((c) => c.category === item.category && (c.count > 0 || c.id === item.cubeId) && isUsable(c, date, S().shelfDays));
-  return lots
-    .map((c) => `<option value="${c.id}" ${c.id === item.cubeId ? 'selected' : ''}>${esc(c.name)} (${shortDate(c.madeDate)} · ${c.count}개)</option>`)
+/** 그 날짜에 쓸 수 있는 큐브를 분류별로 묶은 <option> 목록 */
+function cubeOptions(date, selectedId) {
+  return Object.entries(CATEGORIES)
+    .map(([cat, c]) => {
+      const lots = state.cubes.filter((x) => x.category === cat && (x.count > 0 || x.id === selectedId) && isUsable(x, date, S().shelfDays));
+      if (!lots.length) return '';
+      const opts = lots
+        .map((x) => `<option value="${x.id}" ${x.id === selectedId ? 'selected' : ''}>${esc(x.name)} · ${x.count}개${x.commercial ? ' · 시판' : ` · ~${shortDate(expiryDate(x, S().shelfDays))}`}</option>`)
+        .join('');
+      return `<optgroup label="${c.emoji} ${c.label}">${opts}</optgroup>`;
+    })
     .join('');
 }
-function renderMeal(date, key, meal, { editable = true } = {}) {
+
+/** 이 끼니를 빼고, 아직 안 먹은 다른 끼니들이 잡아둔 수량 */
+function reservedByOthers(date, key) {
+  const reserved = {};
+  for (const [d, p] of Object.entries(state.plans)) {
+    for (const [k, m] of Object.entries(p.meals)) {
+      if (m.done || (d === date && k === key)) continue;
+      for (const it of m.items) if (it.cubeId) reserved[it.cubeId] = (reserved[it.cubeId] || 0) + it.qty;
+    }
+  }
+  return reserved;
+}
+
+/** 수정한 끼니의 주의 사항: 재고 초과, 같은 날 채소 중복 */
+function mealWarnings(date, key, meal) {
+  if (meal.done) return [];
+  const warns = [];
+  const others = reservedByOthers(date, key);
+  for (const it of meal.items) {
+    if (!it.cubeId) continue;
+    const c = cubeById(it.cubeId);
+    if (!c) continue;
+    const left = c.count - (others[c.id] || 0);
+    if (it.qty > left) warns.push(`${it.name}: 다른 끼니에 잡힌 것까지 빼면 ${Math.max(0, left)}개만 남아요`);
+  }
+  const sameDay = new Set(
+    Object.entries(state.plans[date]?.meals || {})
+      .filter(([k]) => k !== key)
+      .flatMap(([, m]) => m.items.filter((i) => i.category === 'veg' && !i.missing).map((i) => i.name)),
+  );
+  const dup = [...new Set(meal.items.filter((i) => i.category === 'veg' && !i.missing && sameDay.has(i.name)).map((i) => i.name))];
+  if (dup.length) warns.push(`${dup.join('·')}: 같은 날 다른 끼니와 겹쳐요`);
+  return warns;
+}
+
+function renderMeal(date, key, meal) {
+  const editing = !meal.done && ui.editing === `${date}|${key}`;
+  const at = `data-date="${date}" data-meal="${key}"`;
   const items = meal.items
     .map((it, idx) => {
       const cat = CATEGORIES[it.category];
+      if (editing) {
+        return `
+        <li class="edit-row ${it.missing ? 'missing' : ''}">
+          <select aria-label="큐브 선택" data-change="edit-cube" ${at} data-idx="${idx}">
+            ${it.missing ? `<option value="" selected>${cat.emoji} ${esc(it.name)} (재고 부족) — 큐브 선택</option>` : ''}
+            ${cubeOptions(date, it.cubeId)}
+          </select>
+          <span class="stepper">
+            <button class="icon" data-action="edit-qty" data-delta="-1" ${at} data-idx="${idx}" aria-label="1개 줄이기">−</button>
+            <b>${it.qty}</b>
+            <button class="icon" data-action="edit-qty" data-delta="1" ${at} data-idx="${idx}" aria-label="1개 늘리기">+</button>
+          </span>
+          <button class="icon-x" data-action="edit-remove" ${at} data-idx="${idx}" aria-label="${esc(it.name)} 빼기">✕</button>
+        </li>`;
+      }
       if (it.missing) return `<li class="missing">${cat.emoji} ${esc(it.name)} ×${it.qty} <span class="badge bad">재고 부족</span></li>`;
       const c = cubeById(it.cubeId);
       const grams = c ? ` · ${c.sizeG * it.qty}g` : '';
-      const swap = editable && !meal.done
-        ? `<select class="swap" aria-label="큐브 변경" data-change="swap" data-date="${date}" data-meal="${key}" data-idx="${idx}">${swapOptions(date, it)}</select>`
-        : '';
-      return `<li><span>${cat.emoji} <b>${esc(it.name)}</b> ×${it.qty}<small>${grams}</small></span>${swap}</li>`;
+      return `<li><span>${cat.emoji} <b>${esc(it.name)}</b> ×${it.qty}<small>${grams}</small></span></li>`;
     })
     .join('');
-  const btn = meal.done
-    ? `<button class="ghost sm" data-action="undo" data-date="${date}" data-meal="${key}">되돌리기</button>`
-    : `<button class="primary sm" data-action="complete" data-date="${date}" data-meal="${key}">✓ 먹었어요</button>`;
+  const addRow = editing
+    ? `<li class="edit-row add"><select aria-label="큐브 추가" data-change="edit-add" ${at}><option value="" selected>＋ 큐브 추가</option>${cubeOptions(date, null)}</select></li>`
+    : '';
+  const btns = meal.done
+    ? `<button class="ghost sm" data-action="undo" ${at}>되돌리기</button>`
+    : `${editing
+      ? `<button class="ghost sm" data-action="edit-done" ${at}>수정 완료</button>`
+      : `<button class="ghost sm" data-action="edit-start" ${at}>✏️ 수정</button>`}
+       <button class="primary sm" data-action="complete" ${at}>✓ 먹었어요</button>`;
+  const warns = mealWarnings(date, key, meal);
   return `
-    <div class="meal ${meal.done ? 'done' : ''}">
+    <div class="meal ${meal.done ? 'done' : ''} ${editing ? 'editing' : ''}">
       <div class="meal-head">
-        <span class="meal-name">${MEALS[key].label}${meal.done ? ' <span class="badge ok">완료</span>' : ''}</span>
-        ${btn}
+        <span class="meal-name">${MEALS[key].label}${meal.done ? ' <span class="badge ok">완료</span>' : ''}${meal.edited ? ' <span class="badge mid">✏️ 직접 수정</span>' : ''}</span>
+        <span class="meal-btns">${btns}</span>
       </div>
-      <ul class="items">${items}</ul>
+      <ul class="items">${items}${addRow}</ul>
+      ${editing ? `<p class="small muted edit-help">큐브를 바꾸거나 개수를 조절하세요. 수정한 끼니는 ⚡ 자동 추천을 다시 눌러도 그대로 유지되고, ✓ 먹었어요를 누르면 이 내용대로 재고에서 빠져요.${meal.edited ? ` <button class="link" data-action="edit-reset" ${at}>자동 추천으로 되돌리기</button>` : ''}</p>` : ''}
+      ${warns.map((w) => `<p class="pair-warn">⚠️ ${esc(w)}</p>`).join('')}
       ${badPairsOf(meal).map((p) => `<p class="pair-warn">⚠️ 궁합 주의: <b>${esc(p.a)}+${esc(p.b)}</b>${p.why ? ` — ${esc(p.why)}` : ''}${meal.done ? '' : '<br>큐브를 바꾸거나 ⚡ 자동 추천을 다시 받아주세요.'}</p>`).join('')}
-      ${meal.comment ? `<p class="comment">💡 ${esc(meal.comment)}</p>` : ''}
+      ${meal.comment ? `<p class="comment">💡 ${meal.edited ? '<small>(추천 당시)</small> ' : ''}${esc(meal.comment)}</p>` : ''}
     </div>`;
 }
 
@@ -689,10 +755,20 @@ function render() {
 }
 
 // ---------- 동작 ----------
+function mealOf(el) {
+  return state.plans[el.dataset.date].meals[el.dataset.meal];
+}
+/** 직접 수정 표시 후 저장 (가족 공유로 동기화) */
+function markEdited(meal) {
+  meal.edited = true;
+  commit();
+}
+
 function generateRule(start, days) {
   const range = Array.from({ length: days }, (_, i) => addDays(start, i));
   const reserved = reservedFromPlans(state.plans, range);
-  const { skipMeals, eatenItems } = eatenInfo(state.plans, range);
+  // 먹은 끼니와 직접 수정한 끼니는 그대로 두고 나머지만 다시 짠다
+  const { skipMeals, eatenItems } = eatenInfo(state.plans, range, { includeEdited: true });
   const out = buildPlan({
     cubes: state.cubes, settings: S(), birth: state.baby.birth, startDate: start, days, reserved, skipMeals, eatenItems,
     recentDinners: recentDinnerProteins(state.plans, start),
@@ -700,7 +776,7 @@ function generateRule(start, days) {
   for (const d of out.days) mergeDay(d.date, d.meals, 'auto');
 }
 function mergeDay(date, meals, source) {
-  const kept = Object.fromEntries(Object.entries(state.plans[date]?.meals || {}).filter(([, m]) => m.done));
+  const kept = Object.fromEntries(Object.entries(state.plans[date]?.meals || {}).filter(([, m]) => m.done || m.edited));
   state.plans[date] = { meals: { ...meals, ...kept }, source };
 }
 function ensureCubes() {
@@ -746,7 +822,35 @@ const actions = {
       render();
     }
   },
+  'edit-start'(el) {
+    ui.editing = `${el.dataset.date}|${el.dataset.meal}`;
+    render();
+  },
+  'edit-done'() {
+    ui.editing = null;
+    render();
+  },
+  'edit-qty'(el) {
+    const meal = mealOf(el);
+    const it = meal.items[+el.dataset.idx];
+    it.qty = Math.max(1, it.qty + +el.dataset.delta);
+    markEdited(meal);
+  },
+  'edit-remove'(el) {
+    const meal = mealOf(el);
+    meal.items.splice(+el.dataset.idx, 1);
+    markEdited(meal);
+  },
+  'edit-reset'(el) {
+    const meal = mealOf(el);
+    delete meal.edited;
+    ui.editing = null;
+    generateRule(el.dataset.date, 1);
+    commit();
+    toast('이 날의 수정하지 않은 끼니와 함께 자동 추천으로 다시 짰어요.');
+  },
   async complete(el) {
+    ui.editing = null;
     const meal = state.plans[el.dataset.date].meals[el.dataset.meal];
     if (meal.items.some((i) => i.missing) && !await ask('부족한 항목은 빼고 있는 큐브만 차감할까요?')) return;
     const { cubes, applied } = applyConsumption(state.cubes, meal.items);
@@ -951,12 +1055,22 @@ const actions = {
 };
 
 const changes = {
-  swap(el) {
-    const meal = state.plans[el.dataset.date].meals[el.dataset.meal];
-    const it = meal.items[+el.dataset.idx];
+  'edit-cube'(el) {
+    const meal = mealOf(el);
     const c = cubeById(el.value);
-    Object.assign(it, { cubeId: c.id, name: c.name });
-    commit();
+    if (!c) return;
+    const idx = +el.dataset.idx;
+    meal.items[idx] = { cubeId: c.id, name: c.name, category: c.category, qty: meal.items[idx].qty || 1 };
+    markEdited(meal);
+  },
+  'edit-add'(el) {
+    const meal = mealOf(el);
+    const c = cubeById(el.value);
+    if (!c) return;
+    const same = meal.items.find((it) => it.cubeId === c.id);
+    if (same) same.qty += 1;
+    else meal.items.push({ cubeId: c.id, name: c.name, category: c.category, qty: 1 });
+    markEdited(meal);
   },
   'show-empty'(el) {
     ui.showEmpty = el.checked;

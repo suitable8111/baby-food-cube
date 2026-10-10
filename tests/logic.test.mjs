@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   ageInfo, mealsForDate, nineMonthDate, expiryDate, buildPlan, forecast,
   matchRecipes, applyConsumption, restoreConsumption, guessCategory, addMonths, daysLeft, isUsable,
+  reservedFromPlans, eatenInfo,
 } from '../web/js/logic.js';
 import { scoreCombo } from '../web/js/nutrition.js';
 
@@ -199,6 +200,29 @@ test('시판 큐브는 소비기한이 없다', () => {
   assert.ok(days[0].meals.lunch.items.some((i) => i.name === '시판 단호박'));
   const f = forecast({ cubes, settings: {}, birth: BIRTH, today: '2026-10-10' });
   assert.ok(!f.waste.some((w) => w.cube.id === 's'));
+});
+
+test('직접 수정한 끼니는 다시 짤 때 유지되고, 그 큐브는 재고에 잡혀 있다', () => {
+  const plans = {
+    '2026-10-06': {
+      meals: {
+        lunch: { edited: true, done: false, items: [{ cubeId: 'b', name: '소고기', category: 'beef', qty: 2 }, { cubeId: 'v1', name: '애호박', category: 'veg', qty: 1 }] },
+        dinner: { done: false, items: [{ cubeId: 'c', name: '닭고기', category: 'chicken', qty: 1 }] },
+      },
+    },
+  };
+  // 그날을 다시 짜도 수정한 점심의 큐브는 잡혀 있고, 수정 안 한 저녁 것은 풀린다
+  assert.deepEqual(reservedFromPlans(plans, ['2026-10-06']), { b: 2, v1: 1 });
+  // 다시 짤 때 수정한 점심은 건너뛰고, 그 채소는 저녁에서 빠진다
+  const { skipMeals, eatenItems } = eatenInfo(plans, ['2026-10-06'], { includeEdited: true });
+  assert.deepEqual(skipMeals['2026-10-06'], ['lunch']);
+  const cubes = [
+    cube('r', '쌀밥', 'rice', '2026-10-06', 10), cube('b', '소고기', 'beef', '2026-10-06', 5), cube('c', '닭고기', 'chicken', '2026-10-06', 5),
+    cube('v1', '애호박', 'veg', '2026-10-06', 5), cube('v2', '당근', 'veg', '2026-10-06', 5), cube('v3', '브로콜리', 'veg', '2026-10-06', 5),
+  ];
+  const { days } = buildPlan({ cubes, settings: {}, birth: BIRTH, startDate: '2026-10-06', days: 1, skipMeals, eatenItems });
+  assert.ok(!days[0].meals.lunch);
+  assert.ok(!days[0].meals.dinner.items.some((i) => i.name === '애호박'));
 });
 
 test('레시피 매칭과 소비/복구', () => {

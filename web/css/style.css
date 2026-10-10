@@ -239,6 +239,20 @@ input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 0; 
 .seg button { flex: 1; background: transparent; color: var(--muted); min-height: 38px; }
 .seg button.on { background: var(--accent); color: #fff; }
 
+/* meal editing */
+.meal-btns { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.meal.editing { border: 2px solid var(--accent); background: var(--card); }
+.items li.edit-row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; }
+.edit-row select { min-height: 38px; padding: 4px 8px; font-size: 13px; }
+.edit-row.missing select { border-color: var(--bad); color: var(--bad); }
+.edit-row.add { grid-template-columns: 1fr; }
+.edit-row.add select { border-style: dashed; color: var(--accent); }
+.stepper { display: inline-flex; align-items: center; gap: 4px; }
+.stepper .icon { width: 30px; height: 30px; min-height: 30px; font-size: 16px; }
+.stepper b { min-width: 18px; text-align: center; }
+.edit-help { margin: 8px 0 0; }
+button.link { background: none; border: none; padding: 0; min-height: 0; color: var(--accent); text-decoration: underline; font-size: inherit; font-weight: 600; }
+
 /* food pairing */
 .pair-warn { margin: 8px 0 0; font-size: 13px; color: var(--bad); background: var(--bad-soft); border-radius: 8px; padding: 6px 10px; }
 .warn-card.bad { background: var(--bad-soft); color: var(--bad); }

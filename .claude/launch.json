@@ -6,6 +6,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["scripts/serve.mjs"],
       "port": 5173
+    },
+    {
+      "name": "web-test",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/serve.mjs", "5174"],
+      "port": 5174
     }
   ]
 }
