@@ -91,17 +91,50 @@ export function info(name, category) {
   return res;
 }
 
-// 맛 궁합: 단백질별로 잘 어울리는 채소, 그리고 채소끼리 잘 어울리는 조합
-const FLAVOR = {
-  beef: ['무', '애호박', '양파', '감자', '버섯', '표고', '시금치', '미역', '당근', '배추', '청경채'],
-  chicken: ['단호박', '브로콜리', '감자', '당근', '양파', '고구마', '양배추', '옥수수'],
-  fish: ['시금치', '감자', '애호박', '브로콜리', '청경채', '무', '양파', '두부'],
+// ---------- 음식 궁합 (1순위) ----------
+// 기본 궁합 표. 설정 화면에서 가족 기준대로 추가·삭제할 수 있다(state.settings.pairs).
+// 토큰 '소고기'·'닭고기'·'생선'은 해당 분류의 모든 큐브와 맞는다.
+export const DEFAULT_PAIRS = {
+  bad: [
+    ['소고기', '고구마', '함께 먹으면 소화가 더디고 궁합이 맞지 않는 조합으로 알려져 있어요'],
+    ['시금치', '두부', '시금치의 옥살산이 두부의 칼슘 흡수를 방해해요'],
+    ['시금치', '치즈', '시금치의 옥살산이 치즈의 칼슘 흡수를 방해해요'],
+    ['시금치', '요거트', '시금치의 옥살산이 요거트의 칼슘 흡수를 방해해요'],
+    ['당근', '오이', '오이의 효소가 당근·오이의 비타민C를 파괴한다고 알려져 있어요'],
+    ['당근', '무', '당근의 효소가 무의 비타민C를 파괴한다고 알려져 있어요'],
+  ],
+  good: [
+    ['소고기', '무'], ['소고기', '애호박'], ['소고기', '양파'], ['소고기', '감자'], ['소고기', '버섯'],
+    ['소고기', '표고'], ['소고기', '양송이'], ['소고기', '새송이'], ['소고기', '시금치'], ['소고기', '미역'],
+    ['소고기', '배추'], ['소고기', '청경채'], ['소고기', '브로콜리'], ['소고기', '당근'],
+    ['닭고기', '단호박'], ['닭고기', '늙은호박'], ['닭고기', '브로콜리'], ['닭고기', '감자'], ['닭고기', '당근'],
+    ['닭고기', '양파'], ['닭고기', '고구마'], ['닭고기', '양배추'], ['닭고기', '옥수수'], ['닭고기', '애호박'], ['닭고기', '버섯'],
+    ['생선', '시금치'], ['생선', '감자'], ['생선', '애호박'], ['생선', '브로콜리'], ['생선', '청경채'],
+    ['생선', '무'], ['생선', '양파'], ['생선', '두부'], ['생선', '미역'],
+    ['감자', '당근'], ['애호박', '양파'], ['단호박', '양파'], ['브로콜리', '콜리플라워'], ['양배추', '당근'],
+    ['무', '배추'], ['단호박', '브로콜리'], ['감자', '브로콜리'], ['애호박', '당근'], ['버섯', '양파'],
+    ['애호박', '버섯'], ['청경채', '버섯'], ['고구마', '사과'], ['단호박', '사과'],
+  ],
 };
-const VEG_PAIRS = [
-  ['감자', '당근'], ['애호박', '양파'], ['단호박', '양파'], ['브로콜리', '콜리플라워'], ['시금치', '당근'],
-  ['양배추', '당근'], ['무', '배추'], ['고구마', '사과'], ['단호박', '브로콜리'], ['감자', '브로콜리'], ['애호박', '당근'],
-];
+
+const CAT_TOKEN = { 소고기: 'beef', 닭고기: 'chicken', 생선: 'fish' };
 const has = (name, k) => (name || '').includes(k);
+/** 궁합 표의 토큰이 재료와 맞는지 */
+export function tokenMatch(token, item) {
+  return CAT_TOKEN[token] ? item.category === CAT_TOKEN[token] : has(item.name, token);
+}
+/** 재료 목록 안에서 궁합 표에 걸리는 조합 찾기 */
+export function findPairs(items, pairs = DEFAULT_PAIRS) {
+  const hit = (list) => list
+    .map(([a, b, why]) => {
+      const x = items.find((it) => tokenMatch(a, it));
+      const y = items.find((it) => it !== x && tokenMatch(b, it));
+      return x && y ? { a: x.name, b: y.name, why } : null;
+    })
+    .filter(Boolean);
+  return { good: hit(pairs.good || []), bad: hit(pairs.bad || []) };
+}
+
 /** 받침 유무에 따라 조사 선택: j('당근','은','는') → '당근은' */
 export function j(word, withBatchim, without) {
   const ch = (word || '').charCodeAt(word.length - 1);
@@ -110,90 +143,89 @@ export function j(word, withBatchim, without) {
 }
 
 /**
- * 한 끼 채소 조합 점수와 이유.
+ * 한 끼 채소(또는 과일) 조합 평가. 우선순위:
+ *   1순위 음식 궁합 — 나쁜 궁합이 하나라도 있으면 제외(excluded), 좋은 궁합 수가 많을수록 우선
+ *   2순위 영양 보완 — 흡수를 돕는 영양 조합, 색 다양성, 하루 중 부족한 영양 보충, 반복 피하기
+ *   3순위 소비기한 — 같은 조건이면 기한 임박한 큐브
+ * score = 궁합×1000 + 영양×10 + 기한 (상위 순위가 항상 하위 순위를 이긴다)
+ *
  * @param base   밥·단백질·기타 등 이미 정해진 재료 [{name, category}]
- * @param vegs   후보 채소 이름 배열
- * @param ctx    { protein, todayTags:Set, todayColors:Set, prevVeg:Set, yesterdayVeg:Set, urgency:Map(name→남은일수) }
+ * @param vegs   후보 이름 배열
+ * @param ctx    { pairs, category, todayTags, todayColors, prevVeg, yesterdayVeg, urgency:Map(name→남은일수) }
  */
 export function scoreCombo(base, vegs, ctx = {}) {
+  const cat = ctx.category || 'veg';
   const bi = base.map((b) => info(b.name, b.category));
-  const vi = vegs.map((n) => info(n, 'veg'));
+  const vi = vegs.map((n) => info(n, cat));
   const all = [...bi, ...vi];
   const reasons = [];
-  let score = 0;
-  const add = (w, text) => {
-    score += w;
-    if (text) reasons.push({ w, text });
-  };
 
-  // 1) 철분 + 비타민C: 비타민C가 철분(특히 채소·곡류의 비헴철) 흡수를 돕는다
+  // 1순위: 궁합 — 이번에 고르는 재료가 포함된 조합만 본다
+  const pr = findPairs(all, ctx.pairs || DEFAULT_PAIRS);
+  const involves = (p) => vegs.includes(p.a) || vegs.includes(p.b);
+  const bad = pr.bad.filter(involves);
+  const good = pr.good.filter(involves);
+  if (bad.length) return { excluded: true, bad, score: -Infinity, pairScore: -1, reasons: [], warnings: bad.map((p) => `${p.a}+${p.b}: ${p.why}`) };
+  for (const p of good) reasons.push({ tier: 1, w: 1, text: `${p.a}+${j(p.b, '은', '는')} 궁합이 좋은 조합` });
+  // 궁합 점수 = 좋은 궁합이 하나 이상 있는 재료 수. (조합 수를 세면 늘 같은 조합만 이겨서 반복된다)
+  const pairScore = vegs.filter((v) => good.some((p) => p.a === v || p.b === v)).length;
+
+  // 2순위: 영양 보완
+  let nutri = 0;
+  const add = (w, text) => {
+    nutri += w;
+    if (text) reasons.push({ tier: 2, w, text });
+  };
   const ironSrc = all.find((i) => i.tags.includes('iron'));
   const vitC = vi.find((i) => i.tags.includes('vitC'));
   if (ironSrc && vitC) add(3, `${vitC.name}의 비타민C가 ${ironSrc.name} 철분 흡수를 도와요`);
-  else if (ironSrc && !vitC) add(-1);
+  else if (ironSrc) add(-1);
 
-  // 2) 베타카로틴 + 지방: 지용성이라 지방과 함께 먹을 때 흡수가 잘 된다
   const car = vi.find((i) => i.tags.includes('carotene'));
   const fat = bi.find((i) => i.tags.includes('fat'));
   if (car && fat) add(2, `${car.name}의 베타카로틴은 ${fat.name}의 지방과 함께 흡수가 잘 돼요`);
   else if (car) add(0.5, `${car.name}에는 참기름·올리브유 한 방울을 더하면 베타카로틴 흡수가 좋아져요`);
 
-  // 3) 비타민D + 칼슘: 비타민D가 칼슘 흡수를 돕는다
   const vd = all.find((i) => i.tags.includes('vitD'));
   const ca = all.find((i) => i.tags.includes('calcium') && i !== vd);
   if (vd && ca) add(1.5, `${vd.name}의 비타민D가 ${ca.name}의 칼슘 흡수를 도와요`);
 
-  // 4) 피할 조합: 옥살산(시금치)이 칼슘 많은 식품(두부·치즈·요거트)의 칼슘 흡수를 방해
-  const ox = all.find((i) => i.oxalate);
-  const caRich = all.find((i) => i.caRich);
-  if (ox && caRich) add(-3, `${j(ox.name, '과', '와')} ${j(caRich.name, '은', '는')} 칼슘 흡수를 방해해 따로 주는 게 좋아요`);
-
-  // 5) 색 다양성: 색이 다르면 서로 다른 항산화·비타민을 고르게 얻는다
   const colors = new Set(vi.map((i) => i.color).filter(Boolean));
   if (colors.size >= 2) add(colors.size - 1, `${[...colors].map((c) => COLORS[c]).join('+')} 서로 다른 색 채소로 영양소를 넓게`);
-  // 6) 같은 분류(예: 뿌리채소 둘)보다 다른 분류
   const groups = new Set(vi.map((i) => i.group).filter(Boolean));
   if (groups.size >= 2) add(0.5 * (groups.size - 1));
 
-  // 7) 하루 균형: 오늘 앞 끼니에서 아직 못 채운 영양소·색을 보충
   if (ctx.todayTags) {
     const missing = ['vitC', 'carotene', 'calcium', 'iron', 'folate', 'fiber'].filter(
       (t) => !ctx.todayTags.has(t) && vi.some((i) => i.tags.includes(t)),
     );
     if (missing.length) add(0.8 * missing.length, ctx.todayTags.size ? `오늘 아직 부족한 ${missing.slice(0, 2).map((t) => NUTRIENTS[t]).join('·')} 보충` : null);
-    const newColors = [...colors].filter((c) => !ctx.todayColors?.has(c));
-    add(0.4 * newColors.length);
+    add(0.4 * [...colors].filter((c) => !ctx.todayColors?.has(c)).length);
   }
-
-  // 8) 맛 궁합
-  const pk = ctx.protein && FLAVOR[ctx.protein] ? ctx.protein : null;
-  const pName = bi.find((i) => ['beef', 'chicken', 'fish'].includes(i.category))?.name;
-  if (pk) {
-    const hits = vegs.filter((v) => FLAVOR[pk].some((k) => has(v, k)));
-    if (hits.length) add(Math.min(2, hits.length), `${j(pName, '과', '와')} ${j(hits.join('·'), '은', '는')} 맛 궁합이 좋아요`);
-  }
-  const pair = VEG_PAIRS.find(([a, b]) => vegs.some((v) => has(v, a)) && vegs.some((v) => has(v, b)));
-  if (pair) add(1, `${pair[0]}+${j(pair[1], '은', '는')} 함께 먹기 좋은 조합`);
-
-  // 9) 소비기한: 임박하면 가산 (단, 영양 규칙보다 앞서지 않도록 가중치 제한)
-  for (const v of vegs) {
-    const d = ctx.urgency?.get(v);
-    if (d === undefined) continue;
-    if (d <= 2) add(4);
-    else if (d <= 4) add(1);
-  }
-
-  // 10) 반복 피하기
   for (const v of vegs) {
     if (ctx.prevVeg?.has(v)) add(-4.5);
     else if (ctx.yesterdayVeg?.has(v)) add(-0.7);
   }
-
-  // DB에 없는 채소는 영양 계산을 못 하므로 약간 감점
   add(-0.3 * vi.filter((i) => !i.known).length);
 
-  reasons.sort((a, b) => b.w - a.w);
-  return { score, reasons: reasons.filter((r) => r.w > 0), warnings: reasons.filter((r) => r.w < 0) };
+  // 3순위: 소비기한 (0~9점)
+  let expiry = 0;
+  for (const v of vegs) {
+    const d = ctx.urgency?.get(v);
+    if (d === undefined) continue;
+    if (d <= 2) expiry += 4;
+    else if (d <= 4) expiry += 1;
+  }
+  expiry = Math.min(9, expiry);
+
+  nutri = Math.max(-40, Math.min(40, nutri));
+  const score = pairScore * 1000 + nutri * 10 + expiry;
+  reasons.sort((a, b) => a.tier - b.tier || b.w - a.w);
+  return {
+    excluded: false, score, pairScore, nutri, expiry,
+    reasons: reasons.filter((r) => r.w > 0),
+    warnings: [],
+  };
 }
 
 export function combinations(arr, k) {

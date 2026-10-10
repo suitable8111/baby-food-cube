@@ -5,7 +5,7 @@ import {
 } from './logic.js';
 import { loadState, saveState, loadAi, saveAi, defaultState, normalizeState, uid } from './store.js';
 import { aiPlan, aiRecipes, aiKey, PROVIDERS } from './ai.js';
-import { info as nInfo, nutritionCheck, NUTRIENTS, KEY_NUTRIENTS } from './nutrition.js';
+import { info as nInfo, nutritionCheck, NUTRIENTS, KEY_NUTRIENTS, findPairs, DEFAULT_PAIRS } from './nutrition.js';
 import {
   sync, initSync, pushState, signIn, signOutSync, createHousehold, joinHousehold, leaveHousehold, inviteLink,
 } from './sync.js';
@@ -168,8 +168,14 @@ function renderMeal(date, key, meal, { editable = true } = {}) {
         ${btn}
       </div>
       <ul class="items">${items}</ul>
+      ${badPairsOf(meal).map((p) => `<p class="pair-warn">⚠️ 궁합 주의: <b>${esc(p.a)}+${esc(p.b)}</b>${p.why ? ` — ${esc(p.why)}` : ''}${meal.done ? '' : '<br>큐브를 바꾸거나 ⚡ 자동 추천을 다시 받아주세요.'}</p>`).join('')}
       ${meal.comment ? `<p class="comment">💡 ${esc(meal.comment)}</p>` : ''}
     </div>`;
+}
+
+/** 끼니 안의 나쁜 궁합 조합 */
+function badPairsOf(meal) {
+  return findPairs(meal.items.filter((it) => !it.missing), S().pairs).bad;
 }
 
 /** 하루 식단의 핵심 영양소 충족 표시 */
@@ -365,24 +371,31 @@ function viewRationale() {
     <details class="why">
       <summary>왜 이렇게 추천하나요?</summary>
       <h3>⚡ 자동 추천 (규칙 기반)</h3>
-      <p class="small muted">인터넷·API 키 없이 항상 같은 기준으로 동작해요. 끼니의 뼈대(밥·단백질)는 고정하고, 채소는 <b>영양 궁합 점수</b>가 가장 높은 조합을 골라요. 소비기한은 점수의 한 요소일 뿐이에요.</p>
+      <p class="small muted">인터넷·API 키 없이 항상 같은 기준으로 동작해요. 끼니의 뼈대(밥·단백질)는 고정하고, 채소는 아래 <b>우선순위</b>대로 골라요. 위 순위가 아래 순위를 항상 이겨요.</p>
+      <ol class="priority">
+        <li><b>음식 궁합</b> — 나쁜 궁합은 기한이 임박해도 절대 같은 끼니에 넣지 않고, 좋은 궁합이 많은 조합을 먼저 골라요.</li>
+        <li><b>영양 보완</b> — 궁합이 같은 조합 중에서 서로 흡수를 돕고 하루 영양을 채우는 조합.</li>
+        <li><b>소비기한</b> — 위 두 가지가 같을 때만 기한 임박한 큐브를 먼저.</li>
+      </ol>
       <table class="why-table">
         <tr><th>매끼 밥 ${s.riceCubesPerMeal}개</th><td>탄수화물은 이유식의 주 에너지원이라 모든 끼니의 기본으로 고정했어요.</td></tr>
         <tr><th>점심 = 소고기</th><td>생후 6개월 무렵부터 몸에 저장된 철분이 줄어들어, 흡수가 잘 되는 소고기(헴철)를 <b>매일</b> 먹이는 것이 일반적인 권장이에요. 점심에 고정하면 하루도 빠지지 않고, 낮에 먹여서 소화나 피부 반응도 살펴보기 쉬워요.</td></tr>
-        <tr><th>저녁 = 닭고기 또는 생선</th><td>단백질 종류를 다양하게 하려고 <b>전날과 번갈아</b> 줘요. 생선(DHA·비타민D)은 <b>주 2회 이상</b>이 되도록, 최근 6일에 2번 미만이면 생선을 먼저 넣어요.</td></tr>
+        <tr><th>저녁 = 닭고기 또는 생선</th><td>단백질 종류를 다양하게 하려고 <b>전날과 번갈아</b> 줘요. 생선(DHA·비타민D)은 <b>주 2회 이상</b>이 되도록 해요. 그날 채소 중 그 단백질과 궁합 맞는 게 하나도 없으면 다른 쪽으로 바꿔요.</td></tr>
       </table>
-      <h3>🥦 채소 조합 규칙 (영양 궁합 점수)</h3>
+      <h3>① 음식 궁합</h3>
+      <p class="small muted">설정 → <b>🤝 음식 궁합</b>에서 가족 기준대로 추가·삭제할 수 있어요. 지금 나쁜 궁합 ${(s.pairs?.bad || []).length}개, 좋은 궁합 ${(s.pairs?.good || []).length}개가 등록돼 있어요.</p>
+      <ul class="small pair-list">${(s.pairs?.bad || []).map(([a, b, w]) => `<li>❌ <b>${esc(a)}+${esc(b)}</b>${w ? ` — ${esc(w)}` : ''}</li>`).join('')}</ul>
+      <h3>② 영양 보완</h3>
       <table class="why-table">
-        <tr><th>철분 + 비타민C <span class="pts">+3</span></th><td>비타민C는 철분(특히 채소·곡류의 비헴철) 흡수를 높여요. 소고기 점심엔 브로콜리·양배추·감자·무 같은 비타민C 채소를 우선해요.</td></tr>
-        <tr><th>베타카로틴 + 지방 <span class="pts">+2</span></th><td>당근·단호박·고구마의 베타카로틴은 지용성이라 소고기·연어·노른자의 지방과 함께 흡수가 잘 돼요. 기름기 적은 닭·흰살생선엔 참기름 한 방울을 권해요.</td></tr>
-        <tr><th>비타민D + 칼슘 <span class="pts">+1.5</span></th><td>생선·버섯의 비타민D가 브로콜리·청경채·두부의 칼슘 흡수를 도와요.</td></tr>
-        <tr><th>피할 조합 <span class="pts bad">−3</span></th><td>시금치의 옥살산은 두부·치즈·요거트의 칼슘 흡수를 방해해 같은 끼니에 넣지 않아요.</td></tr>
-        <tr><th>색 다양성 <span class="pts">+1/색</span></th><td>초록·주황·흰색·빨강 채소는 서로 다른 비타민·항산화 성분을 갖고 있어 색이 다른 채소끼리 묶어요.</td></tr>
-        <tr><th>하루 균형 <span class="pts">+0.8/개</span></th><td>앞 끼니에서 못 채운 비타민C·베타카로틴·칼슘·철분·엽산·식이섬유를 다음 끼니에서 보충해요.</td></tr>
-        <tr><th>맛 궁합 <span class="pts">+1~2</span></th><td>소고기+무·애호박·버섯, 닭고기+단호박·브로콜리, 생선+시금치·감자처럼 잘 어울리는 조합을 더해요.</td></tr>
-        <tr><th>소비기한 <span class="pts">+4/+1</span></th><td>2일 이내 남은 큐브는 +4, 4일 이내는 +1. 만든 날 포함 ${s.shelfDays}일 원칙을 지키되 영양 규칙을 덮어쓰진 않아요.</td></tr>
-        <tr><th>반복 피하기 <span class="pts bad">−4.5/−0.7</span></th><td>바로 앞 끼니와 같은 채소 −4.5 (기한 임박 가산 +4보다 크게 해서 같은 날 반복을 막아요), 전날 먹은 채소 −0.7.</td></tr>
+        <tr><th>철분 + 비타민C</th><td>비타민C는 철분(특히 채소·곡류의 비헴철) 흡수를 높여요.</td></tr>
+        <tr><th>베타카로틴 + 지방</th><td>당근·단호박의 베타카로틴은 지용성이라 소고기·연어·노른자의 지방과 함께 흡수가 잘 돼요. 기름기 적은 닭·흰살생선엔 참기름 한 방울을 권해요.</td></tr>
+        <tr><th>비타민D + 칼슘</th><td>생선·버섯의 비타민D가 브로콜리·청경채·두부의 칼슘 흡수를 도와요.</td></tr>
+        <tr><th>색 다양성</th><td>초록·주황·흰색·빨강 채소는 서로 다른 비타민·항산화 성분을 갖고 있어 색이 다른 채소끼리 묶어요.</td></tr>
+        <tr><th>하루 균형</th><td>앞 끼니에서 못 채운 비타민C·베타카로틴·칼슘·철분·엽산·식이섬유를 다음 끼니에서 보충해요.</td></tr>
+        <tr><th>반복 피하기</th><td>바로 앞 끼니와 같은 채소, 전날 먹은 채소는 피해요.</td></tr>
       </table>
+      <h3>③ 소비기한</h3>
+      <p class="small muted">궁합·영양이 같으면 2일 이내 → 4일 이내 순으로 기한 임박한 큐브를 먼저 써요.</p>
       <p class="small muted">식단 카드의 <b>영양 체크</b>는 하루 동안 단백질·철분·비타민C·베타카로틴·칼슘·DHA·식이섬유를 채웠는지 보여줘요. 큐브 탭에서 재료별 영양 태그도 확인할 수 있어요. 목록에 없는 재료는 궁합 계산에서 빠져요.</p>
       <h3>기타 규칙</h3>
       <table class="why-table">
@@ -406,6 +419,7 @@ function viewPlan() {
   const dates = Object.keys(state.plans)
     .filter((d) => d >= addDays(today, -2))
     .sort();
+  const badCount = dates.reduce((s, d) => s + Object.values(state.plans[d].meals).filter((m) => !m.done && badPairsOf(m).length).length, 0);
   const missingCount = dates.reduce((s, d) => s + Object.values(state.plans[d].meals).filter((m) => !m.done && m.items.some((i) => i.missing)).length, 0);
   const days = dates
     .map((d) => {
@@ -444,6 +458,7 @@ function viewPlan() {
       <p>${esc(ui.aiSummary.summary)}</p>
       ${ui.aiSummary.warnings.length ? `<details><summary class="small muted">앱이 규칙에 맞게 보정한 내용 ${ui.aiSummary.warnings.length}건</summary><ul class="small">${ui.aiSummary.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></details>` : ''}
     </section>` : ''}
+    ${badCount ? `<section class="card warn-card bad">⚠️ 궁합이 맞지 않는 끼니가 ${badCount}개 있어요. ⚡ 자동 추천을 다시 누르면 아직 안 먹은 끼니를 궁합에 맞게 다시 짜요.</section>` : ''}
     ${missingCount ? `<section class="card warn-card">⚠️ 재고가 부족한 끼니가 ${missingCount}개 있어요. 큐브를 더 만들어 등록한 뒤 다시 추천받으세요.</section>` : ''}
     ${days || '<section class="card empty">아직 식단이 없어요. 위에서 추천을 받아보세요.</section>'}`;
 }
@@ -544,6 +559,34 @@ function viewSync() {
   return `<section class="card" id="sync"><h2>☁️ 가족 공유 (클라우드 동기화)</h2>${err}${body}</section>`;
 }
 
+/** 음식 궁합 편집 (식단 추천 1순위 기준) */
+function viewPairs() {
+  const pairs = S().pairs || DEFAULT_PAIRS;
+  const names = [...new Set(['소고기', '닭고기', '생선', ...state.cubes.map((c) => c.name), ...NAME_SUGGEST])];
+  const chip = (kind) => (p, i) => `
+    <li class="pchip ${kind}">
+      <span><b>${esc(p[0])} + ${esc(p[1])}</b>${p[2] ? `<small>${esc(p[2])}</small>` : ''}</span>
+      <button class="icon-x" data-action="pair-del" data-kind="${kind}" data-idx="${i}" aria-label="${esc(p[0])}+${esc(p[1])} 삭제">✕</button>
+    </li>`;
+  return `
+    <section class="card" id="pairs">
+      <h2>🤝 음식 궁합 <small>식단 추천 1순위 기준</small></h2>
+      <p class="muted small">❌ 나쁜 궁합은 소비기한이 임박해도 같은 끼니에 절대 넣지 않고, ⭕ 좋은 궁합은 가장 먼저 골라요. ‘소고기’·‘닭고기’·‘생선’은 그 분류의 모든 큐브(한우 안심, 대구살 등)를 뜻해요.</p>
+      <details open><summary class="small"><b>❌ 나쁜 궁합 ${pairs.bad.length}개</b></summary><ul class="pchips">${pairs.bad.map(chip('bad')).join('')}</ul></details>
+      <details><summary class="small"><b>⭕ 좋은 궁합 ${pairs.good.length}개</b></summary><ul class="pchips">${pairs.good.map(chip('good')).join('')}</ul></details>
+      <div class="pair-form">
+        <datalist id="pair-names">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+        <input id="pair-a" list="pair-names" placeholder="재료 1 (예: 소고기)" autocomplete="off">
+        <span>+</span>
+        <input id="pair-b" list="pair-names" placeholder="재료 2 (예: 고구마)" autocomplete="off">
+        <select id="pair-kind" aria-label="궁합 종류"><option value="bad">❌ 나쁨</option><option value="good">⭕ 좋음</option></select>
+        <input id="pair-why" placeholder="이유 (선택)" autocomplete="off" class="wide">
+        <button class="primary" data-action="pair-add">추가</button>
+      </div>
+      <button class="ghost sm" data-action="pair-reset">기본 궁합표로 되돌리기</button>
+    </section>`;
+}
+
 function viewSettings() {
   const num = (key, label, min, max, hint = '') => `
     <label>${label}<input type="number" min="${min}" max="${max}" step="1" value="${S()[key]}" data-change="setting" data-key="${key}" inputmode="numeric">${hint ? `<small>${hint}</small>` : ''}</label>`;
@@ -567,6 +610,7 @@ function viewSettings() {
         <label class="check"><input type="checkbox" data-change="fruit" ${S().fruitAtBreakfast ? 'checked' : ''}> 아침에 과일 큐브 곁들이기</label>
       </div>
     </section>
+    ${viewPairs()}
     <section class="card">
       <h2>AI 추천</h2>
       <p class="muted small">사용할 AI를 고르고 해당 API 키를 넣어주세요. 키는 이 기기 브라우저에만 저장되고 클라우드 공유·백업 파일에는 포함되지 않아요. 키 없이도 ⚡ 자동 추천은 그대로 쓸 수 있어요.</p>
@@ -776,6 +820,32 @@ const actions = {
     );
     commit();
     toast('예시 큐브를 추가했어요.');
+  },
+  'pair-add'() {
+    const a = $('#pair-a').value.trim();
+    const b = $('#pair-b').value.trim();
+    const kind = $('#pair-kind').value;
+    const why = $('#pair-why').value.trim();
+    if (!a || !b || a === b) return toast('재료 두 개를 입력해주세요.', 'bad');
+    const p = S().pairs || DEFAULT_PAIRS;
+    const same = (x) => (x[0] === a && x[1] === b) || (x[0] === b && x[1] === a);
+    // 같은 조합이 반대 목록에 있으면 옮긴다
+    const next = { good: p.good.filter((x) => !same(x)), bad: p.bad.filter((x) => !same(x)) };
+    next[kind] = [...next[kind], kind === 'bad' ? [a, b, why] : [a, b]];
+    S().pairs = next;
+    commit();
+    toast(`${a}+${b}을(를) ${kind === 'bad' ? '나쁜' : '좋은'} 궁합에 추가했어요. 식단을 다시 추천받으면 반영돼요.`);
+  },
+  'pair-del'(el) {
+    const p = S().pairs || DEFAULT_PAIRS;
+    const kind = el.dataset.kind;
+    S().pairs = { ...p, [kind]: p[kind].filter((_, i) => i !== +el.dataset.idx) };
+    commit();
+  },
+  async 'pair-reset'() {
+    if (!await ask('음식 궁합표를 기본값으로 되돌릴까요? 직접 추가한 궁합은 사라져요.')) return;
+    S().pairs = DEFAULT_PAIRS;
+    commit();
   },
   'ai-provider'(el) {
     ai.provider = el.dataset.p;

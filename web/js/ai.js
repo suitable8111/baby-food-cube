@@ -4,20 +4,29 @@
 import {
   Allocator, CATEGORIES, MEALS, addDays, ageInfo, expiryDate, isUsable, mealsForDate,
 } from './logic.js';
-import { info as nInfo, NUTRIENTS, COLORS } from './nutrition.js';
+import { info as nInfo, NUTRIENTS, COLORS, DEFAULT_PAIRS, findPairs } from './nutrition.js';
 
-// 자동 추천 엔진(nutrition.scoreCombo)과 같은 영양 궁합 원칙
-const NUTRITION_RULES = `영양 궁합 원칙 (소비기한보다 우선해서 고려하되, 기한 2일 이내 큐브는 꼭 활용):
-1. 철분(소고기·시금치·두부·노른자) + 비타민C 채소(브로콜리·양배추·감자·무·파프리카 등)를 같은 끼니에 → 철분 흡수↑
-2. 베타카로틴 채소(당근·단호박·고구마·시금치)는 지방이 있는 단백질(소고기·연어·노른자)과 함께 → 지용성이라 흡수↑. 기름기 적은 끼니엔 참기름 한 방울 팁
-3. 비타민D(생선·버섯) + 칼슘(브로콜리·청경채·두부·치즈) → 칼슘 흡수↑
-4. 피할 조합: 시금치(옥살산)와 칼슘 많은 식품(두부·치즈·요거트)은 같은 끼니에 넣지 않기
-5. 한 끼 채소는 서로 다른 색(초록·주황·흰색·빨강)과 다른 분류로 구성
-6. 하루 전체로 단백질·철분·비타민C·베타카로틴·칼슘·DHA·식이섬유를 고르게 채우고, 앞 끼니에서 부족한 것을 다음 끼니에서 보충
-7. 생선은 주 2회 이상(DHA·비타민D)
-8. 맛 궁합: 소고기+무·애호박·버섯·양파, 닭고기+단호박·브로콜리·고구마, 생선+시금치·감자·애호박
-9. 같은 날 같은 채소 반복은 피하기
+// 자동 추천 엔진(nutrition.scoreCombo)과 같은 우선순위: 음식 궁합 → 영양 보완 → 소비기한
+const NUTRITION_RULES = `재료 조합 우선순위 (위가 항상 우선):
+[1순위] 음식 궁합 — foodPairs를 반드시 따릅니다.
+  - foodPairs.bad의 두 재료는 어떤 경우에도(소비기한이 임박해도) 같은 끼니·같은 레시피에 넣지 않습니다.
+  - foodPairs.good 조합을 최대한 많이 활용합니다.
+  - '소고기'·'닭고기'·'생선'은 해당 분류의 모든 큐브를 뜻합니다.
+[2순위] 영양 보완 — 궁합이 같다면 서로 부족한 영양을 채우는 조합을 고릅니다.
+  - 철분(소고기·시금치·두부·노른자) + 비타민C 채소 → 철분 흡수↑
+  - 베타카로틴 채소 + 지방이 있는 단백질 → 지용성이라 흡수↑ (기름기 적은 끼니엔 참기름 한 방울 팁)
+  - 비타민D(생선·버섯) + 칼슘(브로콜리·청경채·두부) → 칼슘 흡수↑
+  - 한 끼 채소는 서로 다른 색, 하루 전체로 단백질·철분·비타민C·베타카로틴·칼슘·DHA·식이섬유를 고르게
+  - 생선은 주 2회 이상, 같은 날 같은 채소 반복은 피하기
+[3순위] 소비기한 — 위 두 조건이 같을 때만 기한이 임박한 큐브를 먼저 씁니다. 궁합 때문에 못 쓰는 큐브가 있어도 괜찮습니다.
 inventory의 nutrients·color는 각 재료의 대표 영양 정보입니다.`;
+
+function pairsForAI(pairs) {
+  return {
+    bad: pairs.bad.map(([a, b, why]) => ({ a, b, why: why || '' })),
+    good: pairs.good.map(([a, b]) => `${a}+${b}`),
+  };
+}
 
 const SDK_URL = 'https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk/+esm';
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -199,10 +208,12 @@ export async function aiPlan(state, ai, { startDate, days, reserved }) {
       },
     },
   };
+  const pairs = s.pairs || DEFAULT_PAIRS;
   const user = JSON.stringify({
     baby: { ageMonths: age.months, ageDays: age.days },
     schedule,
     perMeal: { riceCubes: s.riceCubesPerMeal, proteinCubes: s.proteinCubesPerMeal, vegKinds: s.vegKindsPerMeal, vegCubesEach: s.vegCubesEach },
+    foodPairs: pairsForAI(pairs),
     inventory,
   });
   const res = await callAI(ai, { system: SYSTEM_PLAN, user, schema });
@@ -238,7 +249,20 @@ export async function aiPlan(state, ai, { startDate, days, reserved }) {
       if (!has(['rice'])) fix('rice');
       if (meal === 'lunch' && !has(['beef'])) fix('beef');
       if (meal === 'dinner' && !has(['chicken', 'fish'])) fix('protein');
-      meals[meal] = { items: mergeItems(items), done: false, comment: aiMeal?.comment || '' };
+      // 나쁜 궁합은 AI가 넣었더라도 빼고(밥·고기·생선은 유지) 재고를 돌려놓는다
+      const removed = [];
+      for (let bad = findPairs(items, pairs).bad; bad.length; bad = findPairs(items, pairs).bad) {
+        const p = bad[0];
+        const fixed = ['rice', 'beef', 'chicken', 'fish'];
+        const idx = items.findIndex((x) => (x.name === p.b || x.name === p.a) && !fixed.includes(x.category));
+        if (idx < 0) break;
+        const [it] = items.splice(idx, 1);
+        alloc.avail.set(it.cubeId, alloc.avail.get(it.cubeId) + it.qty);
+        removed.push(`${p.a}+${p.b}`);
+        warnings.push(`${date} ${MEALS[meal].label}: ${p.a}+${p.b}은(는) 궁합이 맞지 않아 ${it.name}을(를) 뺐습니다.`);
+      }
+      const comment = [aiMeal?.comment, removed.length ? `⚠️ 궁합이 맞지 않는 ${removed.join(', ')} 조합은 앱이 뺐어요` : ''].filter(Boolean).join(' · ');
+      meals[meal] = { items: mergeItems(items), done: false, comment };
     }
     plans[date] = { meals, source: 'ai', provider: ai.provider || 'claude' };
   }
@@ -266,6 +290,7 @@ const SYSTEM_RECIPE = `당신은 9개월 이상 아기를 위한 이유식(후�
 ${NUTRITION_RULES}`;
 
 export async function aiRecipes(state, ai, { date, reserved }) {
+  const pairs = state.settings.pairs || DEFAULT_PAIRS;
   const inventory = inventoryFor(state, date, date, reserved).filter((x) => {
     const c = state.cubes.find((k) => k.id === x.cubeId);
     return isUsable(c, date, state.settings.shelfDays);
@@ -305,12 +330,15 @@ export async function aiRecipes(state, ai, { date, reserved }) {
   const age = ageInfo(state.baby.birth, date);
   const res = await callAI(ai, {
     system: SYSTEM_RECIPE,
-    user: JSON.stringify({ baby: { ageMonths: age.months }, date, inventory }),
+    user: JSON.stringify({ baby: { ageMonths: age.months }, date, foodPairs: pairsForAI(pairs), inventory }),
     schema,
   });
-  return res.recipes.map((r, i) => {
-    const alloc = new Allocator(state.cubes, state.settings, reserved);
-    const items = r.cubes.map((x) => alloc.takeSpecific(date, x.cubeId, x.qty)).filter(Boolean);
-    return { id: `ai-${i}`, title: r.title, items: mergeItems(items), extras: r.extras, steps: r.steps, tip: r.tip, ai: true };
-  });
+  return res.recipes
+    .map((r, i) => {
+      const alloc = new Allocator(state.cubes, state.settings, reserved);
+      const items = r.cubes.map((x) => alloc.takeSpecific(date, x.cubeId, x.qty)).filter(Boolean);
+      return { id: `ai-${i}`, title: r.title, items: mergeItems(items), extras: r.extras, steps: r.steps, tip: r.tip, ai: true };
+    })
+    // 나쁜 궁합이 섞인 레시피는 보여주지 않는다 (추가 재료 포함)
+    .filter((r) => !findPairs([...r.items, ...r.extras.map((e) => ({ name: e, category: 'etc' }))], pairs).bad.length);
 }

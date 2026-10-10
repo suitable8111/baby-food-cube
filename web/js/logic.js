@@ -1,6 +1,6 @@
 // 순수 로직 모듈: 날짜/월령 계산, 소비기한, 식단 배정, 소진 예측, 레시피 매칭.
 // DOM·localStorage에 의존하지 않으므로 node --test로 검증할 수 있다.
-import { info, scoreCombo, combinations, nutritionCheck } from './nutrition.js';
+import { info, scoreCombo, combinations, nutritionCheck, DEFAULT_PAIRS, j } from './nutrition.js';
 
 export const CATEGORIES = {
   rice: { label: '밥', emoji: '🍚' },
@@ -26,6 +26,7 @@ export const DEFAULT_SETTINGS = {
   vegCubesEach: 1,
   fruitAtBreakfast: true,
   forecastHorizon: 45,
+  pairs: DEFAULT_PAIRS, // 음식 궁합 표 (설정에서 편집)
 };
 
 // ---------- 날짜 ----------
@@ -197,8 +198,10 @@ function pickDinnerProtein(alloc, date, need, recentDinners = []) {
 }
 
 /**
- * 영양 궁합 점수가 가장 높은 k종 조합을 고른다 (nutrition.scoreCombo).
- * 소비기한 임박은 점수의 한 요소로만 반영한다.
+ * k종 조합을 고른다 (nutrition.scoreCombo).
+ * 1순위 음식 궁합(나쁜 궁합은 제외) → 2순위 영양 보완 → 3순위 소비기한.
+ * 나쁜 궁합 없이 k종을 못 채우면 종류 수를 줄인다(부족분은 missing으로 표시).
+ * 아무것도 꺼내지 않는다(조회만).
  */
 function chooseCombo(alloc, date, category, base, k, minQty, ctx = {}) {
   const shelf = alloc.settings.shelfDays;
@@ -210,20 +213,30 @@ function chooseCombo(alloc, date, category, base, k, minQty, ctx = {}) {
   }
   const cands = [...byName.values()].filter((v) => v.qty >= minQty);
   const urgency = new Map(cands.map((v) => [v.name, diffDays(date, v.exp)]));
-  const sctx = { ...ctx, urgency };
-  let pool = cands;
+  const sctx = { pairs: alloc.settings.pairs, category, ...ctx, urgency };
+  // 단독으로도 나쁜 궁합인 재료는 후보에서 뺀다
+  const excludedNotes = [];
+  let pool = cands.filter((v) => {
+    const r = scoreCombo(base, [v.name], sctx);
+    if (r.excluded) excludedNotes.push(...r.bad.map((p) => `${p.a}+${j(p.b, '은', '는')} 궁합이 맞지 않아 제외`));
+    return !r.excluded;
+  });
   if (pool.length > 10) {
     const solo = new Map(pool.map((v) => [v.name, scoreCombo(base, [v.name], sctx).score]));
     pool = [...pool].sort((a, b) => solo.get(b.name) - solo.get(a.name)).slice(0, 10);
   }
-  let best = null;
-  for (const combo of combinations(pool, Math.min(k, pool.length))) {
-    const names = combo.map((v) => v.name);
-    const r = scoreCombo(base, names, sctx);
-    const tie = names.reduce((s, n) => s + urgency.get(n), 0);
-    if (!best || r.score > best.r.score + 1e-9 || (Math.abs(r.score - best.r.score) < 1e-9 && tie < best.tie)) best = { names, r, tie };
+  for (let kk = Math.min(k, pool.length); kk >= 0; kk--) {
+    let best = null;
+    for (const combo of combinations(pool, kk)) {
+      const names = combo.map((v) => v.name);
+      const r = scoreCombo(base, names, sctx);
+      if (r.excluded) continue;
+      const tie = names.reduce((s, n) => s + urgency.get(n), 0);
+      if (!best || r.score > best.r.score + 1e-9 || (Math.abs(r.score - best.r.score) < 1e-9 && tie < best.tie)) best = { names, r, tie };
+    }
+    if (best) return { ...best, excludedNotes: [...new Set(excludedNotes)], pairShort: kk < Math.min(k, pool.length) };
   }
-  return best || { names: [], r: { reasons: [], warnings: [] } };
+  return { names: [], r: { reasons: [], pairScore: 0 }, excludedNotes };
 }
 
 function pickVeg(alloc, date, s, base, ctx) {
@@ -231,8 +244,17 @@ function pickVeg(alloc, date, s, base, ctx) {
   const items = [];
   for (const n of best.names) items.push(...alloc.take(date, 'veg', s.vegCubesEach, { name: n }));
   const lacking = s.vegKindsPerMeal - best.names.length;
-  if (lacking > 0) items.push({ missing: true, category: 'veg', name: `채소 ${lacking}종`, qty: lacking * s.vegCubesEach });
-  return { items, reasons: best.r.reasons.map((x) => x.text), warnings: best.r.warnings.map((x) => x.text).filter(Boolean) };
+  if (lacking > 0) {
+    const byPair = best.pairShort || best.excludedNotes?.length;
+    items.push({ missing: true, category: 'veg', name: byPair ? `궁합 맞는 채소 ${lacking}종` : `채소 ${lacking}종`, qty: lacking * s.vegCubesEach });
+  }
+  const rs = best.r.reasons;
+  return {
+    items,
+    pairReasons: rs.filter((x) => x.tier === 1).map((x) => x.text),
+    nutriReasons: rs.filter((x) => x.tier === 2).map((x) => x.text),
+    excludedNotes: best.excludedNotes || [],
+  };
 }
 
 /**
@@ -250,7 +272,26 @@ export function composeMeal(alloc, date, meal, ctx = {}) {
   } else if (meal === 'dinner') {
     const pick = pickDinnerProtein(alloc, date, s.proteinCubesPerMeal, ctx.recentDinners || []);
     protein = pick.cat;
-    if (pick.why) reasons.push(pick.why);
+    let why = pick.why;
+    // 궁합 우선: 지금 단백질과 궁합 맞는 채소가 하나도 없고 다른 단백질은 있으면 바꾼다
+    // (번갈아·생선 주 2회 규칙은 유지, 기한 때문에 고른 경우도 유지)
+    if (protein && !/임박|부족|재고가 없어/.test(why || '')) {
+      const alt = protein === 'chicken' ? 'fish' : 'chicken';
+      if (alloc.usableQty(date, (c) => c.category === alt) >= s.proteinCubesPerMeal) {
+        const pairOf = (cat) => {
+          const lot = alloc.lots(date, (c) => c.category === cat)[0];
+          const b = [...items.filter((it) => !it.missing), { name: lot.name, category: cat }];
+          return chooseCombo(alloc, date, 'veg', b, s.vegKindsPerMeal, s.vegCubesEach, {}).r.pairScore || 0;
+        };
+        const cur = pairOf(protein);
+        const other = pairOf(alt);
+        if (cur === 0 && other > 0) {
+          why = `${L(protein)}와 궁합 맞는 채소가 없어 ${L(alt)}`;
+          protein = alt;
+        }
+      }
+    }
+    if (why) reasons.push(why);
     if (protein) items.push(...alloc.take(date, protein, s.proteinCubesPerMeal, { missingLabel: '닭고기/생선' }));
     else items.push({ missing: true, category: 'chicken', name: '닭고기/생선', qty: s.proteinCubesPerMeal });
   } else if (meal === 'breakfast') {
@@ -271,14 +312,15 @@ export function composeMeal(alloc, date, meal, ctx = {}) {
     yesterdayVeg: ctx.yesterdayVeg,
   });
   items.push(...veg.items);
-  reasons.push(...veg.reasons.slice(0, 2));
+  // 이유는 궁합 → 영양 보완 순으로
+  reasons.push(...veg.pairReasons.slice(0, 2), ...veg.nutriReasons.slice(0, 2), ...veg.excludedNotes.slice(0, 1));
 
   if (meal === 'breakfast' && s.fruitAtBreakfast) {
     const fb = items.filter((it) => !it.missing).map((it) => ({ name: it.name, category: it.category }));
     const fruit = chooseCombo(alloc, date, 'fruit', fb, 1, 1, { todayTags: ctx.todayTags });
     if (fruit.names[0]) {
       items.push(...alloc.take(date, 'fruit', 1, { name: fruit.names[0] }));
-      const fr = fruit.r.reasons.find((r) => /비타민C|흡수/.test(r.text));
+      const fr = fruit.r.reasons.find((r) => r.tier === 1 || /비타민C|흡수/.test(r.text));
       if (fr) reasons.push(fr.text);
     }
   }
@@ -297,7 +339,6 @@ export function composeMeal(alloc, date, meal, ctx = {}) {
       reasons.push(`${it.name} 기한 ${n === 0 ? '오늘까지' : `D-${n}`} → 먼저 사용`);
     }
   }
-  for (const w of veg.warnings) reasons.push(`⚠️ ${w}`);
   return { items, protein, reasons };
 }
 

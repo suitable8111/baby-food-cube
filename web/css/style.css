@@ -239,6 +239,24 @@ input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 0; 
 .seg button { flex: 1; background: transparent; color: var(--muted); min-height: 38px; }
 .seg button.on { background: var(--accent); color: #fff; }
 
+/* food pairing */
+.pair-warn { margin: 8px 0 0; font-size: 13px; color: var(--bad); background: var(--bad-soft); border-radius: 8px; padding: 6px 10px; }
+.warn-card.bad { background: var(--bad-soft); color: var(--bad); }
+.priority { margin: 4px 0 10px; padding-left: 20px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.pair-list { margin: 4px 0; padding-left: 4px; list-style: none; color: var(--muted); }
+#pairs details { margin: 8px 0; }
+#pairs summary { cursor: pointer; }
+.pchips { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.pchip { display: flex; align-items: center; gap: 6px; border-radius: 10px; padding: 4px 4px 4px 10px; font-size: 13px; }
+.pchip.bad { background: var(--bad-soft); color: var(--bad); }
+.pchip.good { background: var(--ok-soft); color: var(--ok); }
+.pchip span { display: flex; flex-direction: column; }
+.pchip small { font-size: 11px; color: inherit; opacity: 0.8; }
+.icon-x { min-height: 28px; width: 28px; padding: 0; border-radius: 50%; background: transparent; color: inherit; font-size: 13px; }
+.pair-form { display: grid; grid-template-columns: 1fr auto 1fr; gap: 6px; align-items: center; margin: 12px 0 8px; }
+.pair-form select, .pair-form .wide { grid-column: 1 / -1; }
+.pair-form button { grid-column: 1 / -1; }
+
 /* confirm dialog */
 .ask {
   border: none; border-radius: var(--radius); padding: 20px; width: min(360px, calc(100% - 32px));

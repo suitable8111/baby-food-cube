@@ -53,18 +53,17 @@ test('식단 규칙: 매끼 밥, 점심 소고기, 저녁 닭/생선', () => {
   assert.match(days[1].meals.dinner.comment, /번갈아/);
 });
 
-test('소비기한 임박 큐브는 이유와 함께 먼저 사용', () => {
+test('궁합·영양이 같으면 소비기한 임박 큐브를 먼저 (3순위)', () => {
   const cubes = [
     cube('r', '쌀밥', 'rice', '2026-10-06', 10),
     cube('b', '소고기', 'beef', '2026-10-06', 5),
-    cube('v1', '애호박', 'veg', '2026-10-06', 5),
-    cube('v2', '당근', 'veg', '2026-10-06', 5),
-    cube('v3', '브로콜리', 'veg', '2026-09-25', 5), // 10/08 만료 → 10/06 기준 D-2
+    cube('v1', '가나채소', 'veg', '2026-10-06', 5),
+    cube('v2', '다라채소', 'veg', '2026-09-25', 5), // 10/08 만료 → 10/06 기준 D-2
   ];
-  const { days } = buildPlan({ cubes, settings: {}, birth: BIRTH, startDate: '2026-10-06', days: 1 });
+  const { days } = buildPlan({ cubes, settings: { vegKindsPerMeal: 1 }, birth: BIRTH, startDate: '2026-10-06', days: 1 });
   const lunch = days[0].meals.lunch;
-  assert.ok(lunch.items.some((it) => it.name === '브로콜리'));
-  assert.match(lunch.comment, /브로콜리 기한 D-2/);
+  assert.ok(lunch.items.some((it) => it.name === '다라채소'));
+  assert.match(lunch.comment, /다라채소 기한 D-2/);
 });
 
 test('9개월 이후 3끼, 소비기한 지난 큐브는 사용 안 함', () => {
@@ -103,8 +102,50 @@ test('영양 궁합: 소고기 점심엔 비타민C 채소를 골라 철분 흡�
   assert.match(lunch.comment, /철분 흡수/);
 });
 
-test('영양 궁합: 시금치+두부는 피할 조합, 베타카로틴+지방은 좋은 조합', () => {
-  assert.ok(scoreCombo([{ name: '두부', category: 'etc' }], ['시금치']).warnings.length > 0);
+test('음식 궁합 1순위: 소고기+고구마는 기한이 임박해도 절대 추천하지 않는다', () => {
+  const cubes = [
+    cube('r', '쌀밥', 'rice', '2026-10-06', 10),
+    cube('b', '소고기', 'beef', '2026-10-06', 5),
+    cube('v1', '고구마', 'veg', '2026-09-25', 5), // D-2, 영양 점수도 높음
+    cube('v2', '무', 'veg', '2026-10-06', 5),
+    cube('v3', '오이', 'veg', '2026-10-06', 5),
+  ];
+  const { days } = buildPlan({ cubes, settings: {}, birth: BIRTH, startDate: '2026-10-06', days: 3 });
+  for (const d of days) {
+    assert.ok(!d.meals.lunch.items.some((i) => i.name === '고구마'), `${d.date} 점심에 고구마`);
+    // 궁합 좋은 무가 들어가고, 그 이유가 맨 앞에 나온다
+    assert.ok(d.meals.lunch.items.some((i) => i.name === '무'));
+  }
+  assert.match(days[0].meals.lunch.comment, /^소고기\+무는 궁합이 좋은 조합/);
+  assert.match(days[0].meals.lunch.comment, /고구마.*제외/);
+});
+
+test('음식 궁합이 영양 점수보다 우선', () => {
+  // 고구마(베타카로틴·비타민C)는 영양 점수가 높지만 궁합표에 소고기와 나쁜 조합 → 제외
+  assert.ok(scoreCombo([{ name: '소고기', category: 'beef' }], ['고구마']).excluded);
+  // 좋은 궁합 하나가 영양 점수 차이보다 크다
+  const good = scoreCombo([{ name: '소고기', category: 'beef' }], ['애호박']); // 궁합 O, 영양 보통
+  const nutri = scoreCombo([{ name: '소고기', category: 'beef' }], ['파프리카']); // 궁합표 없음, 비타민C·베타카로틴
+  assert.ok(good.score > nutri.score);
+  // 사용자가 바꾼 궁합표를 따른다
+  assert.ok(!scoreCombo([{ name: '소고기', category: 'beef' }], ['고구마'], { pairs: { good: [], bad: [] } }).excluded);
+});
+
+test('나쁜 궁합 없이 채울 수 없으면 종류를 줄이고 부족으로 표시', () => {
+  const cubes = [
+    cube('r', '쌀밥', 'rice', '2026-10-06', 10),
+    cube('b', '소고기', 'beef', '2026-10-06', 5),
+    cube('v1', '고구마', 'veg', '2026-10-06', 5),
+    cube('v2', '무', 'veg', '2026-10-06', 5),
+  ];
+  const { days } = buildPlan({ cubes, settings: {}, birth: BIRTH, startDate: '2026-10-06', days: 1 });
+  const lunch = days[0].meals.lunch;
+  assert.deepEqual(lunch.items.filter((i) => i.category === 'veg' && !i.missing).map((i) => i.name), ['무']);
+  assert.ok(lunch.items.some((i) => i.missing && /궁합 맞는 채소/.test(i.name)));
+});
+
+test('영양 보완: 시금치+두부는 피할 조합, 베타카로틴+지방은 좋은 조합', () => {
+  assert.ok(scoreCombo([{ name: '두부', category: 'etc' }], ['시금치']).excluded);
   const r = scoreCombo([{ name: '소고기', category: 'beef' }], ['당근']);
   assert.ok(r.reasons.some((x) => /베타카로틴/.test(x.text)));
   // 색이 다른 조합이 같은 색 조합보다 점수가 높다
