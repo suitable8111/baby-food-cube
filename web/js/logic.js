@@ -77,11 +77,16 @@ export function mealsForDate(birth, date) {
 }
 
 // ---------- 소비기한 ----------
-/** 소비기한(마지막 사용 가능일) = 만든 날 + (shelfDays - 1) */
+/** 시판 큐브는 소비기한이 없다 (정렬 시 맨 뒤로 가도록 아주 먼 날짜) */
+export const NO_EXPIRY = '9999-12-31';
+
+/** 소비기한(마지막 사용 가능일) = 만든 날 + (shelfDays - 1). 시판 큐브는 없음 */
 export function expiryDate(cube, shelfDays = DEFAULT_SETTINGS.shelfDays) {
+  if (cube.commercial) return NO_EXPIRY;
   return addDays(cube.madeDate, shelfDays - 1);
 }
 export function daysLeft(cube, today, shelfDays) {
+  if (cube.commercial) return Infinity;
   return diffDays(today, expiryDate(cube, shelfDays));
 }
 export function isUsable(cube, date, shelfDays) {
@@ -211,7 +216,10 @@ function chooseCombo(alloc, date, category, base, k, minQty, ctx = {}) {
     e.qty += alloc.avail.get(c.id);
     byName.set(c.name, e);
   }
-  const cands = [...byName.values()].filter((v) => v.qty >= minQty);
+  // 같은 날 앞 끼니에 나온 재료는 절대 다시 쓰지 않는다 (ctx.excludeNames)
+  const all = [...byName.values()].filter((v) => v.qty >= minQty);
+  const cands = all.filter((v) => !ctx.excludeNames?.has(v.name));
+  const sameDayShort = cands.length < all.length;
   const urgency = new Map(cands.map((v) => [v.name, diffDays(date, v.exp)]));
   const sctx = { pairs: alloc.settings.pairs, category, ...ctx, urgency };
   // 단독으로도 나쁜 궁합인 재료는 후보에서 뺀다
@@ -234,9 +242,9 @@ function chooseCombo(alloc, date, category, base, k, minQty, ctx = {}) {
       const tie = names.reduce((s, n) => s + urgency.get(n), 0);
       if (!best || r.score > best.r.score + 1e-9 || (Math.abs(r.score - best.r.score) < 1e-9 && tie < best.tie)) best = { names, r, tie };
     }
-    if (best) return { ...best, excludedNotes: [...new Set(excludedNotes)], pairShort: kk < Math.min(k, pool.length) };
+    if (best) return { ...best, excludedNotes: [...new Set(excludedNotes)], pairShort: kk < Math.min(k, pool.length), sameDayShort };
   }
-  return { names: [], r: { reasons: [], pairScore: 0 }, excludedNotes };
+  return { names: [], r: { reasons: [], pairScore: 0 }, excludedNotes, sameDayShort };
 }
 
 function pickVeg(alloc, date, s, base, ctx) {
@@ -246,7 +254,8 @@ function pickVeg(alloc, date, s, base, ctx) {
   const lacking = s.vegKindsPerMeal - best.names.length;
   if (lacking > 0) {
     const byPair = best.pairShort || best.excludedNotes?.length;
-    items.push({ missing: true, category: 'veg', name: byPair ? `궁합 맞는 채소 ${lacking}종` : `채소 ${lacking}종`, qty: lacking * s.vegCubesEach });
+    const label = best.sameDayShort ? `오늘 안 먹은 채소 ${lacking}종` : byPair ? `궁합 맞는 채소 ${lacking}종` : `채소 ${lacking}종`;
+    items.push({ missing: true, category: 'veg', name: label, qty: lacking * s.vegCubesEach });
   }
   const rs = best.r.reasons;
   return {
@@ -310,10 +319,12 @@ export function composeMeal(alloc, date, meal, ctx = {}) {
     todayColors: ctx.todayColors,
     prevVeg: ctx.avoidVeg,
     yesterdayVeg: ctx.yesterdayVeg,
+    excludeNames: ctx.excludeVeg,
   });
   items.push(...veg.items);
   // 이유는 궁합 → 영양 보완 순으로
   reasons.push(...veg.pairReasons.slice(0, 2), ...veg.nutriReasons.slice(0, 2), ...veg.excludedNotes.slice(0, 1));
+  if (ctx.excludeVeg?.size) reasons.push(`오늘 앞 끼니(${[...ctx.excludeVeg].join('·')})와 겹치지 않게 구성`);
 
   if (meal === 'breakfast' && s.fruitAtBreakfast) {
     const fb = items.filter((it) => !it.missing).map((it) => ({ name: it.name, category: it.category }));
@@ -371,6 +382,7 @@ export function buildPlan({ cubes, settings, birth, startDate, days, reserved = 
       if ((skipMeals[date] || []).includes(meal)) continue;
       const { items, protein, reasons } = composeMeal(alloc, date, meal, {
         recentDinners: dinners, avoidVeg: prevVeg, yesterdayVeg, todayTags: day.tags, todayColors: day.colors,
+        excludeVeg: new Set(todayVeg), // 같은 날 채소 중복 금지
       });
       if (meal === 'dinner' && protein) dinners.push(protein);
       prevVeg = new Set(vegOf(items));

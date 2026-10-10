@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   ageInfo, mealsForDate, nineMonthDate, expiryDate, buildPlan, forecast,
-  matchRecipes, applyConsumption, restoreConsumption, guessCategory, addMonths,
+  matchRecipes, applyConsumption, restoreConsumption, guessCategory, addMonths, daysLeft, isUsable,
 } from '../web/js/logic.js';
 import { scoreCombo } from '../web/js/nutrition.js';
 
@@ -164,6 +164,41 @@ test('생선 주 2회: 최근 저녁이 닭고기뿐이면 생선 우선', () =>
   const dinner = days[0].meals.dinner;
   assert.ok(dinner.items.some((i) => i.category === 'fish'));
   assert.match(dinner.comment, /주 2회/);
+});
+
+test('같은 날 점심·저녁 채소는 절대 겹치지 않는다 (모자라면 부족 표시)', () => {
+  const cubes = [
+    cube('r', '쌀밥', 'rice', '2026-10-06', 20),
+    cube('b', '소고기', 'beef', '2026-10-06', 5),
+    cube('c', '닭고기', 'chicken', '2026-10-06', 5),
+    cube('v1', '애호박', 'veg', '2026-10-06', 10),
+    cube('v2', '당근', 'veg', '2026-10-06', 10),
+    cube('v3', '브로콜리', 'veg', '2026-10-06', 10),
+  ];
+  const { days } = buildPlan({ cubes, settings: {}, birth: BIRTH, startDate: '2026-10-06', days: 3 });
+  for (const d of days) {
+    const veg = (m) => d.meals[m].items.filter((i) => i.category === 'veg' && !i.missing).map((i) => i.name);
+    const both = veg('lunch').filter((n) => veg('dinner').includes(n));
+    assert.deepEqual(both, [], `${d.date} 겹침: ${both}`);
+    // 채소가 3종뿐이라 저녁은 1종 + 부족 표시
+    assert.ok(d.meals.dinner.items.some((i) => i.missing && /오늘 안 먹은 채소/.test(i.name)));
+  }
+  // 이미 먹은 점심 채소도 저녁에서 빠진다
+  const eaten = { '2026-10-06': [{ cubeId: 'v1', name: '애호박', category: 'veg', qty: 1 }] };
+  const r = buildPlan({ cubes, settings: {}, birth: BIRTH, startDate: '2026-10-06', days: 1, skipMeals: { '2026-10-06': ['lunch'] }, eatenItems: eaten });
+  assert.ok(!r.days[0].meals.dinner.items.some((i) => i.name === '애호박'));
+});
+
+test('시판 큐브는 소비기한이 없다', () => {
+  const store = { ...cube('s', '시판 단호박', 'veg', '2026-08-01', 5), commercial: true };
+  assert.equal(daysLeft(store, '2026-10-10'), Infinity);
+  assert.ok(isUsable(store, '2026-12-31'));
+  // 오래전에 등록했어도 식단에 쓰이고, 폐기 예상에도 안 잡힌다
+  const cubes = [cube('r', '쌀밥', 'rice', '2026-10-10', 10), cube('b', '소고기', 'beef', '2026-10-10', 5), store];
+  const { days } = buildPlan({ cubes, settings: { vegKindsPerMeal: 1 }, birth: BIRTH, startDate: '2026-10-10', days: 1 });
+  assert.ok(days[0].meals.lunch.items.some((i) => i.name === '시판 단호박'));
+  const f = forecast({ cubes, settings: {}, birth: BIRTH, today: '2026-10-10' });
+  assert.ok(!f.waste.some((w) => w.cube.id === 's'));
 });
 
 test('레시피 매칭과 소비/복구', () => {

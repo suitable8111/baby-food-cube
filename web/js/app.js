@@ -111,6 +111,10 @@ function dBadge(n) {
   const text = n < 0 ? '기한 지남' : n === 0 ? 'D-day' : `D-${n}`;
   return `<span class="badge ${cls}">${text}</span>`;
 }
+/** 소비기한 배지. 시판 큐브는 기한 없음 */
+function expiryBadge(c) {
+  return c.commercial ? '<span class="badge">기한 없음</span>' : dBadge(daysLeft(c, today, S().shelfDays));
+}
 function relDay(date) {
   const n = diffDays(today, date);
   if (n === 0) return '오늘';
@@ -289,7 +293,7 @@ function viewHome() {
     .sort((a, b) => expiryDate(a, S().shelfDays).localeCompare(expiryDate(b, S().shelfDays)));
   const timeline = lots.length
     ? lots
-        .map((c) => `<li>${dBadge(daysLeft(c, today, S().shelfDays))} ${CATEGORIES[c.category].emoji} <b>${esc(c.name)}</b> ${c.count}개 <small>~${shortDate(expiryDate(c, S().shelfDays))}</small></li>`)
+        .map((c) => `<li>${expiryBadge(c)} ${CATEGORIES[c.category].emoji} <b>${esc(c.name)}</b> ${c.count}개 <small>${c.commercial ? '시판' : `~${shortDate(expiryDate(c, S().shelfDays))}`}</small></li>`)
         .join('')
     : '<li class="muted">등록된 큐브가 없어요.</li>';
 
@@ -328,12 +332,11 @@ function viewCubes() {
       if (!lots.length) return '';
       const rows = lots
         .map((x) => {
-          const dl = daysLeft(x, today, S().shelfDays);
           return `
           <li class="lot ${x.count === 0 ? 'empty-lot' : ''}">
             <div class="lot-info">
-              <b>${esc(x.name)}</b> ${x.count > 0 ? dBadge(dl) : '<span class="badge">소진</span>'}
-              <small>${shortDate(x.madeDate)} 제조 · ~${shortDate(expiryDate(x, S().shelfDays))} · ${x.sizeG}g/개</small>
+              <b>${esc(x.name)}</b> ${x.commercial ? '<span class="badge mid">🏪 시판</span> ' : ''}${x.count > 0 ? expiryBadge(x) : '<span class="badge">소진</span>'}
+              <small>${x.commercial ? `${shortDate(x.madeDate)} 등록 · 소비기한 없음` : `${shortDate(x.madeDate)} 제조 · ~${shortDate(expiryDate(x, S().shelfDays))}`} · ${x.sizeG}g/개</small>
               <div class="ntags">${tagChips(x)}</div>
             </div>
             <div class="lot-count">
@@ -342,6 +345,7 @@ function viewCubes() {
               <button class="icon" data-action="inc" data-id="${x.id}" aria-label="1개 추가">+</button>
             </div>
             <div class="lot-actions">
+              <button class="ghost sm" data-action="toggle-commercial" data-id="${x.id}">${x.commercial ? '직접 만든 큐브로' : '시판으로 표시'}</button>
               ${x.count > 0 ? `<button class="ghost sm" data-action="discard" data-id="${x.id}">폐기</button>` : ''}
               <button class="ghost sm danger" data-action="delete" data-id="${x.id}">삭제</button>
             </div>
@@ -362,7 +366,8 @@ function viewCubes() {
         <label>분류
           <select name="category">${Object.entries(CATEGORIES).map(([k, c]) => `<option value="${k}">${c.emoji} ${c.label}</option>`).join('')}</select>
         </label>
-        <label>만든 날짜<input type="date" name="madeDate" value="${today}" max="${today}" required></label>
+        <label class="check full commercial-check"><input type="checkbox" name="commercial"> 🏪 시판 큐브예요 <small>(소비기한 없음)</small></label>
+        <label><span id="date-label">만든 날짜</span><input type="date" name="madeDate" value="${today}" max="${today}" required></label>
         <label>용량 (g/개)<input type="number" name="sizeG" value="30" min="1" step="1" required inputmode="numeric"></label>
         <label>개수<input type="number" name="count" value="6" min="1" step="1" required inputmode="numeric"></label>
         <div class="expiry-preview" id="expiry-preview">${expiryText(today)}</div>
@@ -412,7 +417,7 @@ function viewRationale() {
         <tr><th>비타민D + 칼슘</th><td>생선·버섯의 비타민D가 브로콜리·청경채·두부의 칼슘 흡수를 도와요.</td></tr>
         <tr><th>색 다양성</th><td>초록·주황·흰색·빨강 채소는 서로 다른 비타민·항산화 성분을 갖고 있어 색이 다른 채소끼리 묶어요.</td></tr>
         <tr><th>하루 균형</th><td>앞 끼니에서 못 채운 비타민C·베타카로틴·칼슘·철분·엽산·식이섬유를 다음 끼니에서 보충해요.</td></tr>
-        <tr><th>반복 피하기</th><td>바로 앞 끼니와 같은 채소, 전날 먹은 채소는 피해요.</td></tr>
+        <tr><th>같은 날 중복 금지</th><td><b>같은 날 다른 끼니에 나온 채소는 절대 다시 넣지 않아요.</b> 채소가 모자라면 겹치게 넣지 않고 ‘오늘 안 먹은 채소 부족’으로 알려드려요. 전날 먹은 채소도 되도록 피해요.</td></tr>
       </table>
       <h3>③ 소비기한</h3>
       <p class="small muted">궁합·영양이 같으면 2일 이내 → 4일 이내 순으로 기한 임박한 큐브를 먼저 써요.</p>
@@ -781,6 +786,13 @@ const actions = {
     c.initialCount = Math.max(c.initialCount, c.count);
     commit();
   },
+  'toggle-commercial'(el) {
+    const c = cubeById(el.dataset.id);
+    c.commercial = !c.commercial;
+    if (!c.commercial) delete c.commercial;
+    commit();
+    toast(c.commercial ? `${c.name}: 시판 큐브로 바꿨어요 (소비기한 없음)` : `${c.name}: 직접 만든 큐브로 바꿨어요`);
+  },
   async discard(el) {
     const c = cubeById(el.dataset.id);
     if (!await ask(`${c.name} ${c.count}개를 폐기 처리할까요?`, { okText: '폐기', danger: true })) return;
@@ -1013,7 +1025,11 @@ document.addEventListener('input', (e) => {
   if (!form) return;
   if (e.target.name === 'category') ui.catTouched = true;
   if (e.target.name === 'name' && !ui.catTouched) form.category.value = guessCategory(e.target.value);
-  if (e.target.name === 'madeDate') $('#expiry-preview').innerHTML = expiryText(e.target.value);
+  if (e.target.name === 'madeDate' || e.target.name === 'commercial') {
+    const store = form.commercial.checked;
+    $('#date-label').textContent = store ? '구입·등록 날짜' : '만든 날짜';
+    $('#expiry-preview').innerHTML = store ? '🏪 시판 큐브는 <b>소비기한이 없어</b> 기한 알림·폐기 예상에서 빠져요.' : expiryText(form.madeDate.value);
+  }
 });
 document.addEventListener('submit', (e) => {
   if (e.target.id !== 'cube-form') return;
@@ -1029,13 +1045,14 @@ document.addEventListener('submit', (e) => {
     count,
     initialCount: count,
     createdAt: new Date().toISOString(),
+    ...(f.get('commercial') ? { commercial: true } : {}),
   };
   if (!cube.name || !(count > 0)) return;
   if (daysLeft(cube, today, S().shelfDays) < 0) return toast('이미 소비기한이 지난 날짜예요.', 'bad');
   state.cubes.push(cube);
   ui.catTouched = false;
   commit();
-  toast(`${cube.name} ${count}개 등록! ${shortDate(expiryDate(cube, S().shelfDays))}까지 소진하세요.`);
+  toast(cube.commercial ? `🏪 시판 ${cube.name} ${count}개 등록! (소비기한 없음)` : `${cube.name} ${count}개 등록! ${shortDate(expiryDate(cube, S().shelfDays))}까지 소진하세요.`);
 });
 
 render();

@@ -114,13 +114,14 @@ async function loadUserPrefs() {
       : errMsg(e);
     return false;
   }
-  // 공유 공간: 이 기기에 없으면 계정에 저장된 것으로 자동 연결, 이 기기에만 있으면 계정에 저장
-  if (!sync.householdId && prefs.householdId) {
+  // 공유 공간: 계정에 저장된 공간이 기준. 이 기기가 다른 공간에 있었으면 계정 공간으로 옮기고,
+  // 이 기기 기록은 연결 후 병합(덮어쓰지 않음)으로 계정 공간에 합쳐진다.
+  if (prefs.householdId && prefs.householdId !== sync.householdId) {
     sync.householdId = prefs.householdId;
     ls.set(KEY_HOUSEHOLD, prefs.householdId);
     ls.del(KEY_DIRTY);
     lastRev = null;
-  } else if (sync.householdId && prefs.householdId !== sync.householdId) {
+  } else if (sync.householdId && !prefs.householdId) {
     saveUserPrefs({ householdId: sync.householdId });
   }
   // AI 설정: 더 최근에 바꾼 쪽을 따른다

@@ -17,9 +17,10 @@ const NUTRITION_RULES = `재료 조합 우선순위 (위가 항상 우선):
   - 베타카로틴 채소 + 지방이 있는 단백질 → 지용성이라 흡수↑ (기름기 적은 끼니엔 참기름 한 방울 팁)
   - 비타민D(생선·버섯) + 칼슘(브로콜리·청경채·두부) → 칼슘 흡수↑
   - 한 끼 채소는 서로 다른 색, 하루 전체로 단백질·철분·비타민C·베타카로틴·칼슘·DHA·식이섬유를 고르게
-  - 생선은 주 2회 이상, 같은 날 같은 채소 반복은 피하기
+  - 생선은 주 2회 이상
+[절대 규칙] 같은 날의 끼니끼리 채소 큐브를 겹치지 않습니다(점심에 쓴 채소는 그날 저녁에 쓰지 않음). 모자라면 채소 종류를 줄입니다.
 [3순위] 소비기한 — 위 두 조건이 같을 때만 기한이 임박한 큐브를 먼저 씁니다. 궁합 때문에 못 쓰는 큐브가 있어도 괜찮습니다.
-inventory의 nutrients·color는 각 재료의 대표 영양 정보입니다.`;
+inventory의 nutrients·color는 각 재료의 대표 영양 정보입니다. storeBought(시판) 큐브는 소비기한이 없으니(expiry=null) 직접 만든 큐브를 먼저 씁니다.`;
 
 function pairsForAI(pairs) {
   return {
@@ -133,7 +134,8 @@ function inventoryFor(state, startDate, endDate, reserved) {
       const n = nInfo(c.name, c.category);
       return {
         cubeId: c.id, name: c.name, category: CATEGORIES[c.category].label, sizeG: c.sizeG,
-        available: avail, madeDate: c.madeDate, expiry: expiryDate(c, s.shelfDays),
+        available: avail, madeDate: c.madeDate, expiry: c.commercial ? null : expiryDate(c, s.shelfDays),
+        ...(c.commercial ? { storeBought: true } : {}),
         nutrients: n.tags.filter((t) => NUTRIENTS[t]).map((t) => NUTRIENTS[t]),
         color: n.color ? COLORS[n.color] : null,
         ...(n.oxalate ? { note: '옥살산 많음' } : {}),
@@ -225,6 +227,7 @@ export async function aiPlan(state, ai, { startDate, days, reserved }) {
   for (const { date } of schedule) {
     const aiDay = res.days.find((d) => d.date === date);
     const meals = {};
+    const usedVeg = new Set(); // 같은 날 앞 끼니에 쓴 채소
     for (const meal of mealsForDate(state.baby.birth, date)) {
       const aiMeal = aiDay?.meals.find((m) => m.meal === meal);
       const items = [];
@@ -258,10 +261,21 @@ export async function aiPlan(state, ai, { startDate, days, reserved }) {
         if (idx < 0) break;
         const [it] = items.splice(idx, 1);
         alloc.avail.set(it.cubeId, alloc.avail.get(it.cubeId) + it.qty);
-        removed.push(`${p.a}+${p.b}`);
+        removed.push(`${p.a}+${p.b} 궁합`);
         warnings.push(`${date} ${MEALS[meal].label}: ${p.a}+${p.b}은(는) 궁합이 맞지 않아 ${it.name}을(를) 뺐습니다.`);
       }
-      const comment = [aiMeal?.comment, removed.length ? `⚠️ 궁합이 맞지 않는 ${removed.join(', ')} 조합은 앱이 뺐어요` : ''].filter(Boolean).join(' · ');
+      // 같은 날 앞 끼니와 겹치는 채소는 뺀다
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it.category === 'veg' && usedVeg.has(it.name)) {
+          items.splice(i, 1);
+          alloc.avail.set(it.cubeId, alloc.avail.get(it.cubeId) + it.qty);
+          removed.push(`${it.name} 중복`);
+          warnings.push(`${date} ${MEALS[meal].label}: ${it.name}은(는) 같은 날 앞 끼니에 있어 뺐습니다.`);
+        }
+      }
+      items.filter((x) => x.category === 'veg').forEach((x) => usedVeg.add(x.name));
+      const comment = [aiMeal?.comment, removed.length ? `⚠️ 앱이 뺀 항목: ${removed.join(', ')}` : ''].filter(Boolean).join(' · ');
       meals[meal] = { items: mergeItems(items), done: false, comment };
     }
     plans[date] = { meals, source: 'ai', provider: ai.provider || 'claude' };
