@@ -21,5 +21,10 @@ service cloud.firestore {
 
       allow delete: if false;
     }
+
+    // 계정별 설정(AI API 키, 참여 중인 공유 공간): 본인만 읽고 쓸 수 있다.
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
   }
 }

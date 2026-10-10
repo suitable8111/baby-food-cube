@@ -60,23 +60,72 @@ export async function initSync(h) {
     ]);
     fb = { ...appM, ...authM, ...fsM };
     const app = fb.initializeApp(firebaseConfig);
-    auth = fb.getAuth(app);
+    // 로그인 상태를 브라우저를 닫아도 유지 (IndexedDB → localStorage 순으로 시도)
+    auth = fb.initializeAuth(app, {
+      persistence: [fb.indexedDBLocalPersistence, fb.browserLocalPersistence],
+      popupRedirectResolver: fb.browserPopupRedirectResolver,
+    });
     db = fb.getFirestore(app);
     fb.getRedirectResult(auth).catch((e) => set({ status: 'error', error: errMsg(e) }));
-    fb.onAuthStateChanged(auth, (u) => {
+    fb.onAuthStateChanged(auth, async (u) => {
       sync.user = u ? { uid: u.uid, name: u.displayName || u.email, email: u.email } : null;
       if (!u) {
         disconnect();
         set({ status: 'signed-out' });
-      } else if (sync.householdId) {
-        connect();
-      } else {
-        set({ status: 'no-household' });
+        return;
       }
+      await loadUserPrefs();
+      if (sync.householdId) connect();
+      else set({ status: 'no-household' });
     });
   } catch (e) {
     set({ status: 'error', error: `Firebase를 불러오지 못했어요: ${errMsg(e)}` });
   }
+}
+
+// ---------- 계정별 설정 (users/{uid}) ----------
+// AI API 키와 참여 중인 공유 공간을 계정에 저장해서, 어느 기기에서든 로그인만 하면 다시 불러온다.
+// 이 문서는 본인만 읽고 쓸 수 있다(firestore.rules). 가족 공유 문서와는 별개라 키가 가족에게 보이지 않는다.
+function userRef() {
+  return fb.doc(db, 'users', sync.user.uid);
+}
+
+async function loadUserPrefs() {
+  let prefs = {};
+  try {
+    const snap = await fb.getDoc(userRef());
+    prefs = snap.exists() ? snap.data() : {};
+    sync.prefsError = null;
+  } catch (e) {
+    sync.prefsError = e?.code?.includes('permission-denied')
+      ? '계정에 설정을 저장하려면 Firestore 규칙에 users 규칙을 추가해야 해요.'
+      : errMsg(e);
+    return;
+  }
+  // 공유 공간: 이 기기에 없으면 계정에 저장된 것으로 자동 연결, 이 기기에만 있으면 계정에 저장
+  if (!sync.householdId && prefs.householdId) {
+    sync.householdId = prefs.householdId;
+    ls.set(KEY_HOUSEHOLD, prefs.householdId);
+    ls.del(KEY_DIRTY);
+    lastRev = null;
+  } else if (sync.householdId && prefs.householdId !== sync.householdId) {
+    saveUserPrefs({ householdId: sync.householdId });
+  }
+  // AI 설정: 더 최근에 바꾼 쪽을 따른다
+  handlers.onUserPrefs?.(prefs);
+}
+
+/** 계정 설정 일부 저장 (로그인 안 했으면 무시) */
+export function saveUserPrefs(patch) {
+  if (!fb || !sync.user) return Promise.resolve();
+  return fb.setDoc(userRef(), { ...patch, updatedAt: fb.serverTimestamp() }, { merge: true })
+    .then(() => { sync.prefsError = null; })
+    .catch((e) => {
+      sync.prefsError = e?.code?.includes('permission-denied')
+        ? '계정에 설정을 저장하려면 Firestore 규칙에 users 규칙을 추가해야 해요.'
+        : errMsg(e);
+      handlers.onChange();
+    });
 }
 
 function connect() {
@@ -181,6 +230,7 @@ export async function createHousehold(state) {
   ls.set(KEY_HOUSEHOLD, r.id);
   ls.del(KEY_DIRTY);
   sync.householdId = r.id;
+  saveUserPrefs({ householdId: r.id });
   connect();
 }
 
@@ -197,6 +247,7 @@ export async function joinHousehold(code) {
   ls.del(KEY_DIRTY);
   lastRev = null;
   sync.householdId = id;
+  saveUserPrefs({ householdId: id });
   connect();
   return true;
 }
@@ -207,6 +258,7 @@ export function leaveHousehold() {
   ls.del(KEY_HOUSEHOLD);
   ls.del(KEY_DIRTY);
   sync.householdId = null;
+  saveUserPrefs({ householdId: null });
   set({ status: 'no-household', updatedBy: null });
 }
 

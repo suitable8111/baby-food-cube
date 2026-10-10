@@ -7,7 +7,7 @@ import { loadState, saveState, loadAi, saveAi, defaultState, normalizeState, uid
 import { aiPlan, aiRecipes, aiKey, PROVIDERS } from './ai.js';
 import { info as nInfo, nutritionCheck, NUTRIENTS, KEY_NUTRIENTS, findPairs, DEFAULT_PAIRS } from './nutrition.js';
 import {
-  sync, initSync, pushState, signIn, signOutSync, createHousehold, joinHousehold, leaveHousehold, inviteLink,
+  sync, initSync, pushState, signIn, signOutSync, createHousehold, joinHousehold, leaveHousehold, inviteLink, saveUserPrefs,
 } from './sync.js';
 
 let state = loadState();
@@ -57,6 +57,13 @@ function ask(message, { okText = '확인', danger = false, value = null, cancel 
     d.addEventListener('close', () => resolve(d.returnValue === 'ok'), { once: true });
     d.showModal();
   });
+}
+
+/** AI 설정을 이 기기 + (로그인했으면) 계정에 저장 */
+function persistAi() {
+  ai.updatedAt = Date.now();
+  saveAi(ai);
+  saveUserPrefs({ ai });
 }
 
 function commit() {
@@ -613,7 +620,10 @@ function viewSettings() {
     ${viewPairs()}
     <section class="card">
       <h2>AI 추천</h2>
-      <p class="muted small">사용할 AI를 고르고 해당 API 키를 넣어주세요. 키는 이 기기 브라우저에만 저장되고 클라우드 공유·백업 파일에는 포함되지 않아요. 키 없이도 ⚡ 자동 추천은 그대로 쓸 수 있어요.</p>
+      <p class="muted small">사용할 AI를 고르고 해당 API 키를 넣어주세요. ${sync.user
+        ? `🔐 <b>${esc(sync.user.name)}</b> 계정에 저장돼서 다른 기기에서도 로그인만 하면 자동으로 불러와요. (본인만 볼 수 있고 가족 공유·백업 파일에는 포함되지 않아요)`
+        : '지금은 이 기기에만 저장돼요. 위 ☁️ 가족 공유에서 로그인하면 계정에 저장돼 다른 기기에서도 다시 입력할 필요가 없어요.'} 키 없이도 ⚡ 자동 추천은 그대로 쓸 수 있어요.</p>
+      ${sync.prefsError ? `<p class="sync-err">⚠️ ${esc(sync.prefsError)}</p>` : ''}
       <div class="seg" role="radiogroup" aria-label="AI 선택">
         ${Object.entries(PROVIDERS).map(([k, l]) => `<button role="radio" aria-checked="${ai.provider === k}" class="${ai.provider === k ? 'on' : ''}" data-action="ai-provider" data-p="${k}">${l}${aiKey({ ...ai, provider: k }) ? ' ✓' : ''}</button>`).join('')}
       </div>
@@ -849,7 +859,7 @@ const actions = {
   },
   'ai-provider'(el) {
     ai.provider = el.dataset.p;
-    saveAi(ai);
+    persistAi();
     render();
   },
   'close-summary'() {
@@ -942,8 +952,8 @@ const changes = {
   },
   ai(el) {
     ai[el.dataset.key] = el.value.trim();
-    saveAi(ai);
-    toast('저장했어요.');
+    persistAi();
+    toast(sync.user ? '저장했어요. 계정에도 저장돼 다른 기기에서도 불러와요.' : '이 기기에 저장했어요. 로그인하면 계정에도 저장돼요.');
   },
   import(el) {
     const file = el.files[0];
@@ -1016,6 +1026,18 @@ initSync({
     state = normalizeState(remote);
     saveState(state);
     safeRender();
+  },
+  // 로그인 시 계정에 저장된 AI 설정과 이 기기 설정 중 더 최근 것을 쓴다
+  onUserPrefs(prefs) {
+    const cloud = prefs.ai;
+    if (cloud && (cloud.updatedAt || 0) > (ai.updatedAt || 0)) {
+      ai = { ...ai, ...cloud };
+      saveAi(ai);
+      if (ai.apiKey || ai.geminiKey) toast('계정에 저장된 AI 키를 불러왔어요.');
+      safeRender();
+    } else if ((ai.apiKey || ai.geminiKey) && (cloud?.updatedAt ?? -1) < (ai.updatedAt || 0)) {
+      saveUserPrefs({ ai });
+    }
   },
   onChange() {
     renderHeader();
