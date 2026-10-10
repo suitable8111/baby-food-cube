@@ -2,6 +2,7 @@
 // 가족이 하나의 "공유 공간(households/{id})" 문서를 함께 쓰고, 문서 ID가 곧 초대 코드다.
 // 앱 상태 전체를 JSON 문자열 하나로 저장하고, 마지막에 저장한 쪽이 이긴다(last-write-wins).
 import { firebaseConfig } from './firebase-config.js';
+import { mergeStates, sameState } from './merge.js';
 
 const SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
 const KEY_HOUSEHOLD = 'cubeapp.household';
@@ -31,7 +32,6 @@ let db;
 let ref = null;
 let unsub = null;
 let lastRev = null;
-let firstSnap = true;
 let pushTimer = null;
 let handlers = { getState: () => null, onRemote: () => {}, onChange: () => {} };
 
@@ -75,8 +75,18 @@ export async function initSync(h) {
         return;
       }
       await loadUserPrefs();
-      if (sync.householdId) connect();
-      else set({ status: 'no-household' });
+      if (sync.householdId) {
+        connect();
+      } else if (handlers.shouldAutoCreate?.() !== false) {
+        // 로그인하면 기록이 항상 클라우드에 저장되도록 내 공간을 자동으로 만든다
+        try {
+          await createHousehold(handlers.getState());
+        } catch (e) {
+          set({ status: 'error', error: errMsg(e) });
+        }
+      } else {
+        set({ status: 'no-household' });
+      }
     });
   } catch (e) {
     set({ status: 'error', error: `Firebase를 불러오지 못했어요: ${errMsg(e)}` });
@@ -131,7 +141,6 @@ export function saveUserPrefs(patch) {
 function connect() {
   disconnect();
   ref = fb.doc(db, 'households', sync.householdId);
-  firstSnap = true;
   set({ status: 'syncing', error: null });
   unsub = fb.onSnapshot(
     ref,
@@ -142,18 +151,14 @@ function connect() {
         return;
       }
       const d = snap.data();
-      if (firstSnap && !snap.metadata.fromCache) {
-        firstSnap = false;
-        // 오프라인에서 바꾼 내용이 아직 안 올라갔으면 내 데이터를 먼저 올린다
-        if (ls.get(KEY_DIRTY)) {
-          writeNow(handlers.getState());
-          return;
-        }
-      }
-      if (!snap.metadata.hasPendingWrites && d.rev && d.rev !== lastRev && !ls.get(KEY_DIRTY)) {
+      // 클라우드 데이터가 바뀌면 기기 데이터와 "병합"한다(덮어쓰지 않음).
+      // 병합 결과에 기기에만 있던 내용이 있으면 다시 올린다.
+      if (!snap.metadata.hasPendingWrites && d.rev && d.rev !== lastRev) {
         lastRev = d.rev;
         try {
-          handlers.onRemote(JSON.parse(d.data));
+          const needsPush = handlers.onRemote(JSON.parse(d.data));
+          if (needsPush) writeNow(handlers.getState());
+          else ls.del(KEY_DIRTY);
         } catch (e) {
           console.warn('원격 데이터 해석 실패', e);
         }
@@ -183,15 +188,30 @@ function payload(state, rev) {
   };
 }
 
-function writeNow(state) {
+/** 클라우드 최신본을 읽어 병합한 뒤 저장(트랜잭션). 오프라인이면 일단 내 데이터를 대기열에 넣는다. */
+async function writeNow(state) {
   if (!ref || !state) return;
+  const r = ref;
   const rev = `${sync.user.uid}-${Date.now()}`;
   lastRev = rev;
-  fb.setDoc(ref, payload(state, rev), { merge: true })
-    .then(() => {
-      if (lastRev === rev) ls.del(KEY_DIRTY);
-    })
-    .catch((e) => set({ status: 'error', error: errMsg(e) }));
+  try {
+    const merged = await fb.runTransaction(db, async (tx) => {
+      const snap = await tx.get(r);
+      const raw = snap.exists() ? snap.data().data : null;
+      const m = raw ? mergeStates(state, JSON.parse(raw)) : state;
+      tx.set(r, payload(m, rev), { merge: true });
+      return m;
+    });
+    if (lastRev === rev) ls.del(KEY_DIRTY);
+    if (!sameState(merged, state)) handlers.onMerged?.(merged);
+  } catch (e) {
+    if (e?.code?.includes('permission-denied')) {
+      set({ status: 'error', error: errMsg(e) });
+      return;
+    }
+    // 오프라인 등: 대기열에 넣어두고, 다시 연결되면 스냅샷 병합으로 맞춘다
+    fb.setDoc(r, payload(state, rev), { merge: true }).catch((err) => set({ status: 'error', error: errMsg(err) }));
+  }
 }
 
 /** 로컬 변경을 클라우드에 올린다 (0.6초 디바운스). 연결 전이면 dirty 표시만 남긴다. */

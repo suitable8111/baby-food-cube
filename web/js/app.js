@@ -5,12 +5,14 @@ import {
 } from './logic.js';
 import { loadState, saveState, loadAi, saveAi, defaultState, normalizeState, uid } from './store.js';
 import { aiPlan, aiRecipes, aiKey, PROVIDERS } from './ai.js';
+import { stampChanges, mergeStates, sameState } from './merge.js';
 import { info as nInfo, nutritionCheck, NUTRIENTS, KEY_NUTRIENTS, findPairs, DEFAULT_PAIRS } from './nutrition.js';
 import {
   sync, initSync, pushState, signIn, signOutSync, createHousehold, joinHousehold, leaveHousehold, inviteLink, saveUserPrefs,
 } from './sync.js';
 
 let state = loadState();
+let lastSaved = structuredClone(state); // 변경 감지용 직전 저장본
 let ai = loadAi();
 const today = todayStr();
 const ui = {
@@ -66,11 +68,22 @@ function persistAi() {
   saveUserPrefs({ ai });
 }
 
+/** 클라우드와 맞춘 결과를 기기에 반영 (업로드는 sync가 처리) */
+function applySynced(next) {
+  state = next;
+  saveState(state);
+  lastSaved = structuredClone(state);
+  safeRender();
+}
+
 function commit() {
   // 클라우드 문서 크기(1MB)를 넘지 않도록 120일 지난 식단은 정리
   const cutoff = addDays(today, -120);
   for (const d of Object.keys(state.plans)) if (d < cutoff) delete state.plans[d];
+  // 바뀐 큐브·식단에 시각을 남겨야 다른 기기와 병합할 때 최신 것을 고를 수 있다
+  stampChanges(lastSaved, state);
   saveState(state);
+  lastSaved = structuredClone(state);
   pushState(state);
   render();
 }
@@ -545,7 +558,7 @@ function viewSync() {
         </div>
         <div>
           <h3>가족이 이미 만들었다면</h3>
-          <p class="muted small">받은 초대 코드를 넣으세요. 이 기기 기록은 공유 공간 기록으로 바뀌어요.</p>
+          <p class="muted small">받은 초대 코드를 넣으세요. 이 기기 기록은 가족 공간 기록과 합쳐져요(지워지지 않아요).</p>
           <input id="join-code" placeholder="초대 코드" value="${esc(ui.joinCode)}" autocomplete="off" autocapitalize="off">
           <button class="accent full" data-action="sync-join">참여하기</button>
         </div>
@@ -554,10 +567,16 @@ function viewSync() {
     const [cls, text] = SYNC_LABEL[sync.status] || ['', ''];
     body = `
       <p class="small">👤 ${esc(sync.user.name)} · <span class="badge ${cls}">${text}</span>${sync.updatedBy ? ` <span class="muted">마지막 저장: ${esc(sync.updatedBy)}</span>` : ''}</p>
+      <p class="small">✅ 큐브·식단·기록이 클라우드에 저장되고 있어요. 다른 기기에서도 같은 계정으로 로그인하면 그대로 보여요.</p>
       <label class="small muted">초대 코드
         <div class="code-row"><input readonly value="${esc(sync.householdId)}" aria-label="초대 코드"><button class="ghost sm" data-action="copy-invite">링크 복사</button></div>
       </label>
       <p class="muted small">가족에게 링크를 보내면, 구글 로그인 후 같은 기록을 함께 써요. 링크는 가족에게만 공유하세요.</p>
+      <details class="small">
+        <summary>가족이 만든 공간에 참여하기</summary>
+        <p class="muted">받은 초대 코드를 넣으면 지금 기록이 가족 공간과 합쳐져요(지워지지 않아요).</p>
+        <div class="code-row"><input id="join-code" placeholder="초대 코드" value="${esc(ui.joinCode)}" autocomplete="off" autocapitalize="off"><button class="accent sm" data-action="sync-join">참여</button></div>
+      </details>
       <div class="btn-row wrap">
         <button class="ghost" data-action="sync-leave">이 기기 공유 끊기</button>
         <button class="ghost" data-action="sync-logout">로그아웃</button>
@@ -889,7 +908,7 @@ const actions = {
   async 'sync-join'() {
     const code = $('#join-code')?.value.trim();
     if (!code) return toast('초대 코드를 입력해주세요.', 'bad');
-    if (state.cubes.length && !await ask('참여하면 이 기기의 기록이 공유 공간 기록으로 바뀌어요. 계속할까요?')) return;
+    if (state.cubes.length && !await ask('가족 공간에 참여할까요? 이 기기의 큐브·식단은 지워지지 않고 가족 공간 기록과 합쳐져요.')) return;
     if (await joinHousehold(code)) {
       ui.joinCode = '';
       toast('공유 공간에 참여했어요!');
@@ -1022,11 +1041,19 @@ document.addEventListener('submit', (e) => {
 render();
 initSync({
   getState: () => state,
+  // 클라우드 데이터는 덮어쓰지 않고 기기 데이터와 병합. 기기에만 있던 게 있으면 true → 다시 업로드
   onRemote(remote) {
-    state = normalizeState(remote);
-    saveState(state);
-    safeRender();
+    const r = normalizeState(remote);
+    const merged = normalizeState(mergeStates(state, r));
+    const needsPush = !sameState(merged, r);
+    applySynced(merged);
+    return needsPush;
   },
+  onMerged(merged) {
+    applySynced(normalizeState(merged));
+  },
+  // 초대 링크로 들어온 경우엔 내 공간을 자동으로 만들지 않고 참여를 기다린다
+  shouldAutoCreate: () => !ui.joinCode,
   // 로그인 시 계정에 저장된 AI 설정과 이 기기 설정 중 더 최근 것을 쓴다
   onUserPrefs(prefs) {
     const cloud = prefs.ai;
