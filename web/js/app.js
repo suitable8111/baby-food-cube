@@ -37,6 +37,28 @@ const S = () => state.settings;
 const cubeById = (id) => state.cubes.find((c) => c.id === id);
 const mealKeys = (meals) => Object.keys(meals).sort((a, b) => MEALS[a].order - MEALS[b].order);
 
+/**
+ * 앱 안에서 띄우는 확인 창. 브라우저 기본 confirm()은 카카오톡 등 인앱 브라우저나
+ * 일부 웹뷰에서 막혀 버튼이 아무 반응 없이 끝나기 때문에 쓰지 않는다.
+ */
+function ask(message, { okText = '확인', danger = false, value = null, cancel = true } = {}) {
+  return new Promise((resolve) => {
+    const d = $('#ask');
+    d.innerHTML = `
+      <form method="dialog">
+        <p>${esc(message).replace(/\n/g, '<br>')}</p>
+        ${value !== null ? `<input readonly value="${esc(value)}" onfocus="this.select()">` : ''}
+        <div class="btn-row">
+          ${cancel ? '<button value="cancel" class="ghost">취소</button>' : ''}
+          <button value="ok" class="${danger ? 'danger-fill' : 'primary'}">${esc(okText)}</button>
+        </div>
+      </form>`;
+    d.returnValue = '';
+    d.addEventListener('close', () => resolve(d.returnValue === 'ok'), { once: true });
+    d.showModal();
+  });
+}
+
 function commit() {
   // 클라우드 문서 크기(1MB)를 넘지 않도록 120일 지난 식단은 정리
   const cutoff = addDays(today, -120);
@@ -646,9 +668,9 @@ const actions = {
       render();
     }
   },
-  complete(el) {
+  async complete(el) {
     const meal = state.plans[el.dataset.date].meals[el.dataset.meal];
-    if (meal.items.some((i) => i.missing) && !confirm('부족한 항목은 빼고 있는 큐브만 차감할까요?')) return;
+    if (meal.items.some((i) => i.missing) && !await ask('부족한 항목은 빼고 있는 큐브만 차감할까요?')) return;
     const { cubes, applied } = applyConsumption(state.cubes, meal.items);
     state.cubes = cubes;
     meal.done = true;
@@ -667,9 +689,9 @@ const actions = {
     commit();
     toast('되돌렸어요.');
   },
-  'del-plan'(el) {
+  async 'del-plan'(el) {
     const p = state.plans[el.dataset.date];
-    if (Object.values(p.meals).some((m) => m.done) && !confirm('먹은 기록이 있는 날이에요. 식단만 지우고 재고는 그대로 둘까요?')) return;
+    if (Object.values(p.meals).some((m) => m.done) && !await ask('먹은 기록이 있는 날이에요. 식단만 지우고 재고는 그대로 둘까요?')) return;
     delete state.plans[el.dataset.date];
     commit();
   },
@@ -686,17 +708,23 @@ const actions = {
     c.initialCount = Math.max(c.initialCount, c.count);
     commit();
   },
-  discard(el) {
+  async discard(el) {
     const c = cubeById(el.dataset.id);
-    if (!confirm(`${c.name} ${c.count}개를 폐기 처리할까요?`)) return;
+    if (!await ask(`${c.name} ${c.count}개를 폐기 처리할까요?`, { okText: '폐기', danger: true })) return;
     addLog('discard', '폐기', [{ cubeId: c.id, name: c.name, qty: c.count }]);
     c.count = 0;
     commit();
   },
-  delete(el) {
+  async delete(el) {
     const c = cubeById(el.dataset.id);
-    if (!confirm(`${c.name} (${shortDate(c.madeDate)} 제조) 기록을 완전히 삭제할까요?`)) return;
+    if (!await ask(`${c.name} (${shortDate(c.madeDate)} 제조) 기록을 완전히 삭제할까요?\n아직 안 먹은 식단에 잡혀 있던 이 큐브는 재고 부족으로 표시돼요.`, { okText: '삭제', danger: true })) return;
     state.cubes = state.cubes.filter((x) => x.id !== c.id);
+    for (const p of Object.values(state.plans)) {
+      for (const m of Object.values(p.meals)) {
+        if (m.done) continue;
+        m.items = m.items.map((it) => (it.cubeId === c.id ? { missing: true, category: it.category, name: it.name, qty: it.qty } : it));
+      }
+    }
     commit();
   },
   'recipe-preview'() {
@@ -720,9 +748,9 @@ const actions = {
       render();
     }
   },
-  cook(el) {
+  async cook(el) {
     const r = [...(ui.aiRecipes || []), ...currentRecipes()].find((x) => x.id === el.dataset.id);
-    if (!r || !confirm(`${r.title}에 쓸 큐브를 재고에서 차감할까요?\n${r.items.map((i) => `${i.name}×${i.qty}`).join(', ')}`)) return;
+    if (!r || !await ask(`${r.title}에 쓸 큐브를 재고에서 차감할까요?\n${r.items.map((i) => `${i.name}×${i.qty}`).join(', ')}`)) return;
     state.cubes = applyConsumption(state.cubes, r.items).cubes;
     addLog('recipe', r.title, r.items);
     if (r.ai) ui.aiRecipes = ui.aiRecipes.filter((x) => x.id !== r.id);
@@ -737,8 +765,8 @@ const actions = {
     a.click();
     URL.revokeObjectURL(a.href);
   },
-  sample() {
-    if (state.cubes.length && !confirm('지금 큐브 목록에 예시 큐브를 추가할까요?')) return;
+  async sample() {
+    if (state.cubes.length && !await ask('지금 큐브 목록에 예시 큐브를 추가할까요?')) return;
     const mk = (name, category, ago, count, sizeG = 30) => ({ id: uid(), name, category, madeDate: addDays(today, -ago), sizeG, count, initialCount: count, createdAt: new Date().toISOString() });
     state.cubes.push(
       mk('쌀죽', 'rice', 3, 16, 40), mk('쌀죽', 'rice', 0, 12, 40),
@@ -781,14 +809,14 @@ const actions = {
   async 'sync-join'() {
     const code = $('#join-code')?.value.trim();
     if (!code) return toast('초대 코드를 입력해주세요.', 'bad');
-    if (state.cubes.length && !confirm('참여하면 이 기기의 기록이 공유 공간 기록으로 바뀌어요. 계속할까요?')) return;
+    if (state.cubes.length && !await ask('참여하면 이 기기의 기록이 공유 공간 기록으로 바뀌어요. 계속할까요?')) return;
     if (await joinHousehold(code)) {
       ui.joinCode = '';
       toast('공유 공간에 참여했어요!');
     }
   },
-  'sync-leave'() {
-    if (!confirm('이 기기만 공유를 끊어요. 기록은 이 기기에 그대로 남고, 다른 가족 기기에는 영향이 없어요.')) return;
+  async 'sync-leave'() {
+    if (!await ask('이 기기만 공유를 끊어요. 기록은 이 기기에 그대로 남고, 다른 가족 기기에는 영향이 없어요.')) return;
     leaveHousehold();
   },
   async 'copy-invite'() {
@@ -800,11 +828,11 @@ const actions = {
         toast('초대 링크를 복사했어요.');
       }
     } catch {
-      prompt('아래 링크를 복사해서 보내세요', link);
+      ask('아래 링크를 복사해서 가족에게 보내세요', { value: link, okText: '닫기', cancel: false });
     }
   },
-  reset() {
-    if (!confirm('모든 큐브·식단·기록을 지울까요? (API 키는 유지)')) return;
+  async reset() {
+    if (!await ask('모든 큐브·식단·기록을 지울까요? (API 키는 유지)', { okText: '모두 지우기', danger: true })) return;
     state = defaultState();
     ui.aiRecipes = null;
     commit();
@@ -850,11 +878,11 @@ const changes = {
   import(el) {
     const file = el.files[0];
     if (!file) return;
-    file.text().then((txt) => {
+    file.text().then(async (txt) => {
       try {
         const data = JSON.parse(txt);
         if (!Array.isArray(data.cubes)) throw new Error();
-        if (!confirm('지금 데이터를 백업 파일 내용으로 바꿀까요?')) return;
+        if (!await ask('지금 데이터를 백업 파일 내용으로 바꿀까요?')) return;
         state = normalizeState(data);
         commit();
         toast('가져왔어요.');
