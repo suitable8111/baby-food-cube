@@ -74,10 +74,12 @@ export async function initSync(h) {
         set({ status: 'signed-out' });
         return;
       }
-      await loadUserPrefs();
+      const prefsOk = await loadUserPrefs();
       if (sync.householdId) {
         connect();
-      } else if (handlers.shouldAutoCreate?.() !== false) {
+      } else if (prefsOk && handlers.shouldAutoCreate?.() !== false) {
+        // 계정 설정을 읽었는데도 공간이 없을 때만 새로 만든다.
+        // (읽기 실패 시 만들면 기기마다 서로 다른 공간이 생긴다)
         // 로그인하면 기록이 항상 클라우드에 저장되도록 내 공간을 자동으로 만든다
         try {
           await createHousehold(handlers.getState());
@@ -110,7 +112,7 @@ async function loadUserPrefs() {
     sync.prefsError = e?.code?.includes('permission-denied')
       ? '계정에 설정을 저장하려면 Firestore 규칙에 users 규칙을 추가해야 해요.'
       : errMsg(e);
-    return;
+    return false;
   }
   // 공유 공간: 이 기기에 없으면 계정에 저장된 것으로 자동 연결, 이 기기에만 있으면 계정에 저장
   if (!sync.householdId && prefs.householdId) {
@@ -123,6 +125,7 @@ async function loadUserPrefs() {
   }
   // AI 설정: 더 최근에 바꾼 쪽을 따른다
   handlers.onUserPrefs?.(prefs);
+  return true;
 }
 
 /** 계정 설정 일부 저장 (로그인 안 했으면 무시) */
